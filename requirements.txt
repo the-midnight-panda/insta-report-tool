@@ -3,3 +3,6 @@ requests
 anthropic
 python-pptx
 python-dotenv
+beautifulsoup4
+gunicorn
+lxml
