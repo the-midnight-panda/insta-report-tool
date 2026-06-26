@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Social Media Report Tool</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Segoe UI',sans-serif;background:#070f1f;color:#e0e6f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:50px 20px}
+    .label{font-size:11px;letter-spacing:3px;color:#d4af37;text-transform:uppercase;margin-bottom:12px}
+    h1{font-size:38px;font-weight:700;color:#fff;margin-bottom:8px;text-align:center}
+    .subtitle{font-size:14px;color:#7a8aaa;margin-bottom:36px;text-align:center}
+    .platforms{display:flex;gap:12px;margin-bottom:36px;flex-wrap:wrap;justify-content:center}
+    .pb{padding:8px 18px;border-radius:20px;font-size:13px;font-weight:600;border:1px solid}
+    .ig{background:#1a0a1a;border-color:#e1306c;color:#e1306c}
+    .fb{background:#0a1428;border-color:#1877f2;color:#1877f2}
+    .yt{background:#1a0a0a;border-color:#ff3b30;color:#ff3b30}
+    .li{background:#0a1a1a;border-color:#16a085;color:#16a085}
+    .card{background:#0e1e3a;border:1px solid #1e3058;border-radius:16px;padding:32px;width:100%;max-width:640px}
+    .field-label{font-size:11px;letter-spacing:2px;color:#7a8aaa;text-transform:uppercase;margin-bottom:8px}
+    input{width:100%;padding:14px 16px;background:#070f1f;border:1px solid #1e3058;border-radius:8px;color:#fff;font-size:15px;margin-bottom:8px;outline:none;transition:border .2s}
+    input:focus{border-color:#d4af37}
+    .hint{font-size:12px;color:#4a5a7a;margin-bottom:20px}
+    button{width:100%;padding:15px;background:#1a5aff;color:#fff;font-size:15px;font-weight:600;border:none;border-radius:8px;cursor:pointer;transition:background .2s}
+    button:hover{background:#1447cc}
+    button:disabled{background:#1e3058;color:#4a5a7a;cursor:not-allowed}
+    .stages{width:100%;max-width:640px;margin-top:24px;display:none}
+    .stage-card{background:#0e1e3a;border:1px solid #1e3058;border-radius:12px;padding:20px 24px;margin-bottom:12px}
+    .stage-row{display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid #1e3058;font-size:13px;color:#7a8aaa}
+    .stage-row:last-child{border-bottom:none}
+    .stage-row.done{color:#e0e6f0}
+    .icon{width:22px;text-align:center}
+    .found-handles{background:#0a1a0a;border:1px solid #2ecc71;border-radius:8px;padding:12px 16px;margin-top:10px;display:none;font-size:13px}
+    .handle-row{display:flex;align-items:center;gap:10px;padding:4px 0;color:#e0e6f0}
+    .result-card{background:#0e1e3a;border:1px solid #1e3058;border-radius:12px;padding:24px;margin-top:16px;display:none;width:100%;max-width:640px}
+    .result-card h3{color:#d4af37;font-size:15px;margin-bottom:14px}
+    .platform-section{margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #1e3058}
+    .platform-section:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+    .platform-title{font-size:13px;font-weight:700;margin-bottom:8px}
+    .data-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px}
+    .data-key{color:#7a8aaa}
+    .data-val{color:#e0e6f0;text-align:right}
+    .download-btn{display:block;margin-top:20px;padding:14px;background:#d4af37;color:#070f1f;font-weight:700;font-size:15px;border-radius:8px;text-align:center;text-decoration:none}
+    .download-btn:hover{background:#c49b2f}
+    .error-msg{background:#2a0a0a;border:1px solid #5a1a1a;color:#ff6b6b;padding:14px 18px;border-radius:8px;margin-top:16px;font-size:14px;display:none;width:100%;max-width:640px}
+  </style>
+</head>
+<body>
+
+  <div class="label">Social Media Intelligence</div>
+  <h1>Brand Social Report Tool</h1>
+  <p class="subtitle">Enter any brand website → get a 14-slide multi-platform PPT report</p>
+
+  <div class="platforms">
+    <span class="pb ig">📸 Instagram</span>
+    <span class="pb fb">👥 Facebook</span>
+    <span class="pb yt">▶️ YouTube</span>
+    <span class="pb li">💼 LinkedIn</span>
+  </div>
+
+  <div class="card">
+    <div class="field-label">Brand Website URL</div>
+    <input type="text" id="websiteInput" placeholder="e.g. sporticoresorts.com or sunpure.in"/>
+    <p class="hint">We'll automatically find all social accounts from the website</p>
+    <button id="generateBtn" onclick="generate()">Generate Social Media Report</button>
+  </div>
+
+  <div class="stages" id="stages">
+    <div class="stage-card">
+      <div class="stage-row" id="s1"><span class="icon">→</span> Scanning website for social handles</div>
+      <div class="stage-row" id="s2"><span class="icon">→</span> Fetching Instagram profile data</div>
+      <div class="stage-row" id="s3"><span class="icon">→</span> Fetching Facebook page data</div>
+      <div class="stage-row" id="s4"><span class="icon">→</span> Fetching YouTube channel data</div>
+      <div class="stage-row" id="s5"><span class="icon">→</span> Fetching LinkedIn data</div>
+      <div class="stage-row" id="s6"><span class="icon">→</span> Analysing with Claude AI</div>
+      <div class="stage-row" id="s7"><span class="icon">→</span> Building 14-slide PowerPoint</div>
+    </div>
+    <div class="found-handles" id="foundHandles"></div>
+  </div>
+
+  <div class="result-card" id="resultCard">
+    <h3>📊 Report Generated Successfully</h3>
+    <div id="platformData"></div>
+    <a class="download-btn" id="downloadBtn" href="#">⬇ Download 14-Slide Social Media Report</a>
+  </div>
+
+  <div class="error-msg" id="errorMsg"></div>
+
+  <script>
+    async function generate() {
+      const input = document.getElementById("websiteInput").value.trim();
+      if (!input) { alert("Please enter a website URL!"); return; }
+
+      document.getElementById("stages").style.display = "block";
+      document.getElementById("resultCard").style.display = "none";
+      document.getElementById("errorMsg").style.display = "none";
+      document.getElementById("foundHandles").style.display = "none";
+      document.getElementById("generateBtn").disabled = true;
+      document.getElementById("generateBtn").textContent = "Generating...";
+
+      const stages = ["s1","s2","s3","s4","s5","s6","s7"];
+      stages.forEach(id => {
+        document.getElementById(id).classList.remove("done");
+        document.getElementById(id).querySelector(".icon").textContent = "→";
+      });
+
+      let i = 0;
+      const interval = setInterval(() => {
+        if (i > 0) {
+          document.getElementById(stages[i-1]).querySelector(".icon").textContent = "✅";
+          document.getElementById(stages[i-1]).classList.add("done");
+        }
+        if (i < stages.length) {
+          document.getElementById(stages[i]).querySelector(".icon").textContent = "⏳";
+          i++;
+        } else clearInterval(interval);
+      }, 4000);
+
+      try {
+        const res = await fetch("/generate", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({website_url: input})
+        });
+
+        clearInterval(interval);
+        const result = await res.json();
+        if (!res.ok || result.error) throw new Error(result.error || "Something went wrong");
+
+        stages.forEach(id => {
+          document.getElementById(id).querySelector(".icon").textContent = "✅";
+          document.getElementById(id).classList.add("done");
+        });
+
+        // Show found handles
+        const handles = result.handles || {};
+        const hBox = document.getElementById("foundHandles");
+        const found = [
+          ["📸", "instagram"],
+          ["👥", "facebook"],
+          ["▶️", "youtube"],
+          ["💼", "linkedin"]
+        ].filter(([_, p]) => handles[p]);
+
+        hBox.innerHTML = "<strong style='color:#2ecc71'>✅ Social accounts found:</strong><br>" +
+          found.map(([icon, p]) =>
+            `<div class='handle-row'>${icon} &nbsp;<strong>${p}:</strong> &nbsp;${handles[p]}</div>`
+          ).join("");
+        hBox.style.display = "block";
+
+        // Show data per platform
+        const a   = result.analysis || {};
+        const ig  = a.instagram || {};
+        const fb  = a.facebook  || {};
+        const yt  = a.youtube   || {};
+        const li  = a.linkedin  || {};
+
+        document.getElementById("platformData").innerHTML = `
+          <div class="platform-section">
+            <div class="platform-title" style="color:#e1306c">📸 Instagram — @${handles.instagram || 'N/A'}</div>
+            ${row("Followers",       ig.followers)}
+            ${row("Engagement Rate", ig.engagement_rate)}
+            ${row("Avg Likes/Post",  ig.avg_likes)}
+            ${row("Total Posts",     ig.posts)}
+          </div>
+          <div class="platform-section">
+            <div class="platform-title" style="color:#1877f2">👥 Facebook — ${handles.facebook || 'N/A'}</div>
+            ${row("Followers", fb.followers)}
+            ${row("Rating",    fb.rating)}
+            ${row("Category",  fb.category)}
+          </div>
+          <div class="platform-section">
+            <div class="platform-title" style="color:#ff3b30">▶️ YouTube — ${handles.youtube || 'N/A'}</div>
+            ${row("Subscribers",  yt.subscribers)}
+            ${row("Total Videos", yt.videos)}
+            ${row("Total Views",  yt.views)}
+          </div>
+          <div class="platform-section">
+            <div class="platform-title" style="color:#16a085">💼 LinkedIn — ${handles.linkedin || 'N/A'}</div>
+            ${row("Followers",  li.followers)}
+            ${row("Employees",  li.employees)}
+          </div>`;
+
+        document.getElementById("downloadBtn").href = result.download_url;
+        document.getElementById("resultCard").style.display = "block";
+
+      } catch(err) {
+        clearInterval(interval);
+        document.getElementById("errorMsg").textContent = "❌ " + err.message;
+        document.getElementById("errorMsg").style.display = "block";
+      }
+
+      document.getElementById("generateBtn").disabled = false;
+      document.getElementById("generateBtn").textContent = "Generate Social Media Report";
+    }
+
+    function row(k, v) {
+      return `<div class="data-row">
+        <span class="data-key">${k}</span>
+        <span class="data-val">${v || 'N/A'}</span>
+      </div>`;
+    }
+  </script>
+</body>
+</html>
