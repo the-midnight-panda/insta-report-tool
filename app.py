@@ -50,18 +50,24 @@ def extract_social_from_html(html):
             "login","signup","intent","home","search"}
     for tag in soup.find_all("a", href=True):
         href = tag["href"].lower()
+
         if "instagram.com" in href and "instagram" not in handles:
             m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)/?', href, re.I)
             if m and m.group(1).lower() not in SKIP:
                 handles["instagram"] = m.group(1)
+
+        # ── FIX: Skip profile.php Facebook URLs ──────────────
         if "facebook.com" in href and "facebook" not in handles:
-            m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', href, re.I)
-            if m and m.group(1).lower() not in SKIP:
-                handles["facebook"] = m.group(1)
+            if "profile.php" not in href:
+                m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', href, re.I)
+                if m and m.group(1).lower() not in SKIP:
+                    handles["facebook"] = m.group(1)
+
         if "linkedin.com/company" in href and "linkedin" not in handles:
             m = re.search(r'linkedin\.com/company/([A-Za-z0-9_.-]+)/?', href, re.I)
             if m:
                 handles["linkedin"] = m.group(1)
+
         if "youtube.com" in href and "youtube" not in handles:
             m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', href, re.I)
             if m:
@@ -98,16 +104,20 @@ def find_handles_from_searchapi(website_url, missing_platforms):
     SKIP = {"p","explore","accounts","stories","reel","tv","share",
             "sharer","login","signup","intent","home","search"}
 
-    print(f"   Brand detected: '{brand}' from domain: '{domain}'")
+    # Extract all meaningful words from brand for flexible matching
+    brand_words = re.split(r'[-_.]', brand)
+    print(f"   Brand: '{brand}' | Words: {brand_words} | Domain: '{domain}'")
 
     queries = {
         "instagram": [
             f'{domain} instagram',
-            f'"{brand}" instagram official account',
+            f'"{brand}" instagram official',
+            f'site:instagram.com "{brand}"',
         ],
         "facebook": [
-            f'"{brand}" facebook official page',
+            f'"{brand}" facebook page',
             f'{domain} facebook',
+            f'site:facebook.com "{brand}"',
         ],
         "linkedin": [
             f'"{brand}" site:linkedin.com/company',
@@ -115,7 +125,7 @@ def find_handles_from_searchapi(website_url, missing_platforms):
             f'"{brand}" linkedin company followers',
         ],
         "youtube": [
-            f'"{brand}" youtube channel official',
+            f'"{brand}" youtube channel',
             f'{domain} youtube',
         ],
     }
@@ -126,7 +136,7 @@ def find_handles_from_searchapi(website_url, missing_platforms):
             if found:
                 break
             try:
-                print(f"   🔍 Searching: {q}")
+                print(f"   🔍 {platform}: {q}")
                 r = requests.get(
                     "https://www.searchapi.io/api/v1/search",
                     params={"engine":"google","q":q,
@@ -136,17 +146,25 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                     continue
 
                 results = r.json().get("organic_results",[])
-                for result in results:
+                for idx, result in enumerate(results):
                     link    = result.get("link","")
                     title   = result.get("title","").lower()
                     snippet = result.get("snippet","").lower()
 
-                    brand_clean = brand.replace("-","").replace("_","").replace(" ","")
-
                     def brand_match(text):
+                        """Check if ANY brand word appears in text."""
                         text_clean = text.replace("-","").replace("_","").replace(" ","").lower()
-                        return brand_clean in text_clean
+                        brand_clean = brand.replace("-","").replace("_","").replace(" ","")
+                        # Full brand match
+                        if brand_clean in text_clean:
+                            return True
+                        # Any individual word match (for brands like "talla jewellers")
+                        for word in brand_words:
+                            if len(word) > 3 and word in text_clean:
+                                return True
+                        return False
 
+                    # ── Instagram ─────────────────────────────
                     if platform == "instagram" and "instagram.com" in link:
                         m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)/?', link, re.I)
                         if m:
@@ -157,8 +175,21 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                                 handles["instagram"] = handle
                                 print(f"   ✅ Instagram: @{handle}")
                                 found = True; break
+                            # Accept first result if it's top result and domain matches
+                            elif idx == 0 and (domain.replace("www.","").split(".")[0] in handle.lower()
+                                               or brand.split("-")[0] in handle.lower()):
+                                handles["instagram"] = handle
+                                print(f"   ✅ Instagram (domain match): @{handle}")
+                                found = True; break
+                            else:
+                                print(f"   ⚠️ Instagram skipped: @{handle}")
 
+                    # ── Facebook ──────────────────────────────
                     elif platform == "facebook" and "facebook.com" in link:
+                        # ── FIX: Skip profile.php URLs ────────
+                        if "profile.php" in link:
+                            print(f"   ⚠️ Facebook skipped profile.php")
+                            continue
                         m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', link, re.I)
                         if m:
                             handle = m.group(1)
@@ -171,14 +202,15 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                             else:
                                 print(f"   ⚠️ Facebook skipped wrong brand: {handle}")
 
+                    # ── LinkedIn ──────────────────────────────
                     elif platform == "linkedin" and "linkedin.com/company" in link:
                         m = re.search(r'linkedin\.com/company/([A-Za-z0-9_.-]+)/?', link, re.I)
                         if m:
-                            handle = m.group(1)
-                            handles["linkedin"] = handle
-                            print(f"   ✅ LinkedIn: {handle}")
+                            handles["linkedin"] = m.group(1)
+                            print(f"   ✅ LinkedIn: {m.group(1)}")
                             found = True; break
 
+                    # ── YouTube ───────────────────────────────
                     elif platform == "youtube" and "youtube.com" in link:
                         m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', link, re.I)
                         if not m:
@@ -190,7 +222,7 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                                 print(f"   ✅ YouTube: @{handle}")
                                 found = True; break
                             else:
-                                print(f"   ⚠️ YouTube skipped wrong channel: {handle}")
+                                print(f"   ⚠️ YouTube skipped: {handle}")
 
             except Exception as e:
                 print(f"   ⚠️ SearchAPI failed for {platform}: {e}")
@@ -208,9 +240,11 @@ def discover_all_handles(website_url):
         google_handles = find_handles_from_searchapi(website_url, missing)
         handles.update(google_handles)
         print(f"   Final handles: {handles}")
-    if not handles.get("instagram"):
+
+    # Don't require all platforms — just need at least one
+    if not handles:
         raise ValueError(
-            f"Could not find any Instagram account for {website_url}. "
+            f"Could not find any social media accounts for {website_url}. "
             "Please check the website URL."
         )
     return handles
@@ -347,17 +381,8 @@ def fetch_youtube(channel_id):
     return data
 
 def fetch_linkedin(company_handle):
-    """
-    ── KEY FIX ──
-    Use company name (not handle) in search query.
-    Google shows "TalkingLands | 204 followers on LinkedIn"
-    when searching by name, not by handle slug.
-    """
     print(f"💼 Fetching LinkedIn: {company_handle}")
-
-    # Convert handle to readable name e.g. "talking-lands" → "talking lands"
-    company_name = company_handle.replace("-", " ").replace("_", " ")
-
+    company_name = company_handle.replace("-"," ").replace("_"," ")
     data = {
         "company":   company_handle,
         "followers": "N/A",
@@ -388,7 +413,6 @@ def fetch_linkedin(company_handle):
                 return m.group(1).strip()
         return None
 
-    # ── KEY FIX: Use company name in queries, not just handle ──
     queries = [
         f'{company_name} linkedin followers',
         f'"{company_name}" linkedin company followers',
@@ -409,34 +433,22 @@ def fetch_linkedin(company_handle):
 
             result_json = r.json()
 
-            # ── Check knowledge graph ──────────────────────────
-            kg = result_json.get("knowledge_graph", {})
-            if kg:
-                kg_str = json.dumps(kg)
-                f = extract_followers(kg_str)
-                e = extract_employees(kg_str)
-                if f and data["followers"] == "N/A":
-                    data["followers"] = f
-                    print(f"   ✅ KG followers: {f}")
-                if e and data["employees"] == "N/A":
-                    data["employees"] = e
+            for key in ["knowledge_graph","answer_box"]:
+                section = result_json.get(key, {})
+                if section:
+                    s = json.dumps(section)
+                    f = extract_followers(s)
+                    e = extract_employees(s)
+                    if f and data["followers"] == "N/A":
+                        data["followers"] = f
+                        print(f"   ✅ {key} followers: {f}")
+                    if e and data["employees"] == "N/A":
+                        data["employees"] = e
 
-            # ── Check answer box ──────────────────────────────
-            ab = result_json.get("answer_box", {})
-            if ab:
-                ab_str = json.dumps(ab)
-                f = extract_followers(ab_str)
-                if f and data["followers"] == "N/A":
-                    data["followers"] = f
-                    print(f"   ✅ Answer box followers: {f}")
-
-            # ── Check all organic results ──────────────────────
             for res in result_json.get("organic_results", []):
                 link    = res.get("link","")
                 snippet = res.get("snippet","")
                 title   = res.get("title","")
-
-                # Build combined text including sitelinks
                 all_text = f"{title} {snippet}"
                 sitelinks = res.get("sitelinks", [])
                 if isinstance(sitelinks, list):
@@ -445,32 +457,26 @@ def fetch_linkedin(company_handle):
                 elif isinstance(sitelinks, dict):
                     all_text += json.dumps(sitelinks)
 
-                print(f"   text: {all_text[:120]}")
-
                 f = extract_followers(all_text)
                 e = extract_employees(all_text)
-
                 if f and data["followers"] == "N/A":
                     data["followers"] = f
                     print(f"   ✅ Followers: {f}")
                 if e and data["employees"] == "N/A":
                     data["employees"] = e
-
                 if "linkedin.com/company" in link:
                     if not data.get("snippet"):
                         data["snippet"] = snippet
                     if title:
                         data["company"] = title.replace("| LinkedIn","").replace("LinkedIn","").strip()
 
-            # Stop as soon as we find followers
             if data["followers"] != "N/A":
-                print(f"   ✅ LinkedIn final: {data['followers']} followers | {data['employees']} employees")
+                print(f"   ✅ LinkedIn final: {data['followers']} followers")
                 return data
 
         except Exception as e:
             print(f"   ⚠️ LinkedIn query failed: {e}")
 
-    print(f"   LinkedIn result: {data['followers']} followers | {data['employees']} employees")
     return data
 
 
@@ -503,7 +509,6 @@ Return ONLY a JSON object:
   "brand_name": "brand name",
   "niche": "3-5 words describing the brand",
   "overall_summary": "2-3 sentence overview of their social media presence",
-
   "instagram": {{
     "followers": "exact from data",
     "engagement_rate": "exact from data",
@@ -515,7 +520,6 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
-
   "facebook": {{
     "followers": "exact from data",
     "category": "exact from data",
@@ -524,7 +528,6 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
-
   "youtube": {{
     "subscribers": "exact from data",
     "videos": "exact from data",
@@ -534,7 +537,6 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
-
   "linkedin": {{
     "followers": "exact from data",
     "employees": "exact from data",
@@ -542,7 +544,6 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
-
   "cross_platform": {{
     "strongest_platform": "which platform performs best and why",
     "weakest_platform": "which needs most work and why",
@@ -551,7 +552,6 @@ Return ONLY a JSON object:
     "growth_opportunity": "biggest growth opportunity"
   }}
 }}
-
 Return ONLY JSON. No markdown. No explanation.
 Use EXACT numbers from data — never write N/A if data exists.
 """
@@ -654,14 +654,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     brand = analysis.get("brand_name", website_url)
     niche = analysis.get("niche", "")
 
-    # ── SLIDE 1: Cover ─────────────────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, DARK)
     circ = s.shapes.add_shape(9, Inches(9.8), Inches(-2), Inches(6), Inches(6))
     circ.fill.solid(); circ.fill.fore_color.rgb = RGBColor(0x12,0x24,0x4A)
     circ.line.fill.background()
-    tb(s, "SOCIAL MEDIA INTELLIGENCE REPORT", 0.7, 1.2, 10, 0.5,
-       size=12, bold=True, color=GOLD, italic=True)
+    tb(s, "SOCIAL MEDIA INTELLIGENCE REPORT", 0.7, 1.2, 10, 0.5, size=12, bold=True, color=GOLD, italic=True)
     tb(s, brand, 0.7, 1.75, 10, 1.1, size=42, bold=True, color=WHITE)
     tb(s, niche, 0.7, 2.85, 9, 0.45, size=16, color=GOLD, italic=True)
     tb(s, f"🌐  {website_url}", 0.7, 3.4, 9, 0.4, size=13, color=LIGHT)
@@ -682,25 +680,22 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     tb(s, f"Powered by SearchAPI.io + Claude AI  •  {website_url}",
        0.7, 7.1, 12, 0.3, size=10, color=LIGHT, italic=True, align=PP_ALIGN.CENTER)
 
-    # ── SLIDE 2: Overview Table ────────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "Social Media Overview", f"{brand}  —  All platforms at a glance")
     add_table(s, ["Platform","Handle","Followers/Subscribers","Key Metric","Status"], [
-        ["📸 Instagram", f"@{handles.get('instagram','N/A')}", ig.get("followers","N/A"), f"ER: {ig.get('engagement_rate','N/A')}", "✅ Active"],
-        ["👥 Facebook",  handles.get("facebook","N/A"),        fb.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",      "✅ Active"],
-        ["▶️ YouTube",   handles.get("youtube","N/A"),          yt.get("subscribers","N/A"), f"Videos: {yt.get('videos','N/A')}",   "✅ Active"],
-        ["💼 LinkedIn",  handles.get("linkedin","N/A"),         li.get("followers","N/A"), f"Employees: {li.get('employees','N/A')}", "✅ Active"],
+        ["📸 Instagram", f"@{handles.get('instagram','N/A')}", ig.get("followers","N/A"), f"ER: {ig.get('engagement_rate','N/A')}", "✅ Active" if handles.get("instagram") else "❌ Not Found"],
+        ["👥 Facebook",  handles.get("facebook","N/A"),        fb.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",      "✅ Active" if handles.get("facebook") else "❌ Not Found"],
+        ["▶️ YouTube",   handles.get("youtube","N/A"),          yt.get("subscribers","N/A"), f"Videos: {yt.get('videos','N/A')}",   "✅ Active" if handles.get("youtube") else "❌ Not Found"],
+        ["💼 LinkedIn",  handles.get("linkedin","N/A"),         li.get("followers","N/A"), f"Employees: {li.get('employees','N/A')}", "✅ Active" if handles.get("linkedin") else "❌ Not Found"],
     ], 0.5, 1.3, 12.3, 3.5)
     rect(s, 0.5, 5.1, 12.3, 1.8, NAVY2, GOLD)
     tb(s, "OVERALL ANALYSIS", 0.75, 5.2, 5, 0.35, size=11, bold=True, color=GOLD)
     tb(s, analysis.get("overall_summary",""), 0.75, 5.6, 11.8, 1.1, size=13, color=WHITE)
 
-    # ── SLIDE 3: Instagram Stat Cards ─────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
-    slide_title(s, "📸  Instagram Profile",
-                f"@{handles.get('instagram','N/A')}  —  {ig.get('bio_summary','')}")
+    slide_title(s, "📸  Instagram Profile", f"@{handles.get('instagram','N/A')}  —  {ig.get('bio_summary','')}")
     for (lbl,val,col),(x,y) in zip([
         ("FOLLOWERS",         ig.get("followers","N/A"),      GREEN),
         ("FOLLOWING",         ig_raw.get("following","N/A"),  TEAL),
@@ -711,11 +706,9 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1),(4.7,4.1),(8.9,4.1)]):
         stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
 
-    # ── SLIDE 4: Instagram Content Mix ────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
-    slide_title(s, "📸  Instagram Content Strategy",
-                f"Content mix from recent {ig_raw.get('post_count',12)} posts")
+    slide_title(s, "📸  Instagram Content Strategy", f"Content mix from recent {ig_raw.get('post_count',12)} posts")
     img_c = ig_raw.get("img_count",0)
     car_c = ig_raw.get("car_count",0)
     vid_c = ig_raw.get("vid_count",0)
@@ -723,10 +716,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd = ChartData()
     cd.categories = ["Images","Carousels","Videos/Reels"]
     cd.add_series("Posts",(img_c,car_c,vid_c))
-    chart = s.shapes.add_chart(
-        XL_CHART_TYPE.COLUMN_CLUSTERED,
-        Inches(0.5),Inches(1.3),Inches(7.2),Inches(5.0),cd
-    ).chart
+    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5),Inches(1.3),Inches(7.2),Inches(5.0),cd).chart
     chart.has_legend = False
     for i,col in enumerate([TEAL,GOLD,PURPLE]):
         pt = chart.plots[0].series[0].points[i]
@@ -735,19 +725,13 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     chart.category_axis.tick_labels.font.color.rgb = WHITE
     chart.value_axis.tick_labels.font.size = Pt(11)
     chart.value_axis.tick_labels.font.color.rgb = WHITE
-    for i,(lbl,cnt,col) in enumerate([
-        ("IMAGES",       img_c, TEAL),
-        ("CAROUSELS",    car_c, GOLD),
-        ("VIDEOS/REELS", vid_c, PURPLE),
-    ]):
+    for i,(lbl,cnt,col) in enumerate([("IMAGES",img_c,TEAL),("CAROUSELS",car_c,GOLD),("VIDEOS/REELS",vid_c,PURPLE)]):
         stat_card(s, 8.1, 1.3+i*1.9, 4.7, 1.65, lbl, f"{cnt} posts ({int(cnt/total*100)}%)", col)
     insight_card(s, 0.5, 6.55, 12.3, 0.75, "💡 Instagram Strength", ig.get("strength",""), GREEN)
 
-    # ── SLIDE 5: Facebook Stat Cards ──────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
-    slide_title(s, "👥  Facebook Page",
-                f"{handles.get('facebook','N/A')}  —  {fb.get('category','')}")
+    slide_title(s, "👥  Facebook Page", f"{handles.get('facebook','N/A')}  —  {fb.get('category','')}")
     for (lbl,val,col),(x,y) in zip([
         ("PAGE FOLLOWERS", fb.get("followers","N/A"),      BLUE),
         ("FOLLOWING",      fb_raw.get("following","N/A"),  TEAL),
@@ -758,7 +742,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1),(4.7,4.1),(8.9,4.1)]):
         stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
 
-    # ── SLIDE 6: Facebook Insights ────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "👥  Facebook Insights", "Page details and strategic analysis")
@@ -774,11 +757,9 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     insight_card(s, 6.8, 3.7,  5.9, 1.1, "💡 Strength",       fb.get("strength","N/A"), BLUE)
     insight_card(s, 6.8, 5.05, 5.9, 1.1, "🎯 Recommendation", fb.get("recommendation","N/A"), GOLD)
 
-    # ── SLIDE 7: YouTube Stat Cards ───────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
-    slide_title(s, "▶️   YouTube Channel",
-                f"{handles.get('youtube','N/A')}  —  {yt.get('description_summary','')}")
+    slide_title(s, "▶️   YouTube Channel", f"{handles.get('youtube','N/A')}  —  {yt.get('description_summary','')}")
     for (lbl,val,col),(x,y) in zip([
         ("SUBSCRIBERS",  yt.get("subscribers","N/A"), RED),
         ("TOTAL VIDEOS", yt.get("videos","N/A"),      ORANGE),
@@ -789,14 +770,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1),(4.7,4.1),(8.9,4.1)]):
         stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
 
-    # ── SLIDE 8: YouTube Insights ─────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "▶️   YouTube Channel Insights", "Channel performance and strategic analysis")
     rect(s, 0.5, 1.3, 12.3, 2.0, NAVY2, RED)
     tb(s, "CHANNEL DESCRIPTION", 0.75, 1.4, 6, 0.35, size=11, bold=True, color=RED)
-    tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:300],
-       0.75, 1.8, 11.8, 1.3, size=13, color=WHITE)
+    tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:300], 0.75, 1.8, 11.8, 1.3, size=13, color=WHITE)
     insight_card(s, 0.5,  3.55, 6.0, 1.4, "💡 Strength",       yt.get("strength","N/A"), RED)
     insight_card(s, 6.85, 3.55, 5.9, 1.4, "🎯 Recommendation", yt.get("recommendation","N/A"), GOLD)
     add_table(s, ["Metric","Value"], [
@@ -813,11 +792,9 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     except:
         tb(s, "N/A", 7.1, 5.65, 5.4, 1.0, size=32, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
 
-    # ── SLIDE 9: LinkedIn ─────────────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
-    slide_title(s, "💼  LinkedIn Company Page",
-                f"linkedin.com/company/{handles.get('linkedin','N/A')}")
+    slide_title(s, "💼  LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}")
     for (lbl,val,col),(x,y) in zip([
         ("FOLLOWERS",   li.get("followers","N/A"), TEAL),
         ("EMPLOYEES",   li.get("employees","N/A"), BLUE),
@@ -831,7 +808,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     insight_card(s, 0.5,  6.3, 6.0, 0.9, "💡 Strength",       li.get("strength","N/A"), TEAL)
     insight_card(s, 6.85, 6.3, 5.9, 0.9, "🎯 Recommendation", li.get("recommendation","N/A"), GOLD)
 
-    # ── SLIDE 10: LinkedIn Insights ───────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "💼  LinkedIn Strategic Analysis", "Professional presence and B2B opportunities")
@@ -845,7 +821,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     insight_card(s, 0.5,  5.55, 6.0, 1.65, "💡 Strength",       li.get("strength","N/A"), TEAL)
     insight_card(s, 6.85, 5.55, 5.9, 1.65, "🎯 Recommendation", li.get("recommendation","N/A"), GOLD)
 
-    # ── SLIDE 11: Cross-Platform Comparison ───────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "📊  Cross-Platform Follower Comparison", "Audience size across all platforms")
@@ -863,10 +838,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd2 = ChartData()
     cd2.categories = ["Instagram","Facebook","YouTube","LinkedIn"]
     cd2.add_series("Followers/Subscribers",(ig_f,fb_f,yt_f,li_f))
-    chart2 = s.shapes.add_chart(
-        XL_CHART_TYPE.COLUMN_CLUSTERED,
-        Inches(0.5),Inches(1.3),Inches(8.0),Inches(5.5),cd2
-    ).chart
+    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5),Inches(1.3),Inches(8.0),Inches(5.5),cd2).chart
     chart2.has_legend = False
     for i,col in enumerate([GREEN,BLUE,RED,TEAL]):
         pt = chart2.plots[0].series[0].points[i]
@@ -883,7 +855,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ]):
         stat_card(s, 8.85, 1.3+i*1.55, 4.0, 1.3, lbl, val, col)
 
-    # ── SLIDE 12: Engagement Benchmarks ───────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "📈  Engagement Benchmarks", "Performance metrics vs industry standards")
@@ -903,7 +874,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["💼 LinkedIn", "Followers",         li.get("followers","N/A"),      "Varies by industry", "📊 Data"],
     ], 0.5, 1.3, 12.3, 5.8)
 
-    # ── SLIDE 13: Strengths & Gaps ────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs)
     slide_title(s, "💪  Key Strengths & Gaps", "What's working and what needs attention")
@@ -919,11 +889,9 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     tb(s, "OVERALL SUMMARY", 0.75, 4.85, 5, 0.35, size=11, bold=True, color=PURPLE)
     tb(s, analysis.get("overall_summary","N/A"), 0.75, 5.25, 11.8, 1.25, size=13, color=WHITE)
 
-    # ── SLIDE 14: Recommendations ─────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, DARK)
-    tb(s, "STRATEGIC RECOMMENDATIONS", 0.6, 0.25, 12, 0.5,
-       size=13, bold=True, color=GOLD, italic=True)
+    tb(s, "STRATEGIC RECOMMENDATIONS", 0.6, 0.25, 12, 0.5, size=13, bold=True, color=GOLD, italic=True)
     tb(s, "Action Plan", 0.6, 0.7, 12, 0.65, size=32, bold=True, color=WHITE)
     for (title,body,col,x,y) in [
         ("📸  Instagram", ig.get("recommendation","N/A"), GREEN, 0.5, 1.55),
@@ -942,8 +910,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
-    safe_name  = re.sub(r'[^A-Za-z0-9_]', '_',
-                        analysis.get("brand_name", website_url).replace(" ","_"))
+    safe_name = re.sub(r'[^A-Za-z0-9_]', '_', analysis.get("brand_name", website_url).replace(" ","_"))
     path = os.path.join(output_dir, f"{safe_name}_social_report.pptx")
     prs.save(path)
     print(f"✅ PPT saved: {path}")
@@ -966,10 +933,10 @@ def generate():
         if not website_url:
             return jsonify({"error":"Please enter a website URL"}), 400
         handles  = discover_all_handles(website_url)
-        ig_raw   = fetch_instagram(handles.get("instagram",""))
-        fb_raw   = fetch_facebook(handles.get("facebook",""))  if handles.get("facebook")  else {}
-        yt_raw   = fetch_youtube(handles.get("youtube",""))    if handles.get("youtube")   else {}
-        li_raw   = fetch_linkedin(handles.get("linkedin",""))  if handles.get("linkedin")  else {}
+        ig_raw   = fetch_instagram(handles.get("instagram","")) if handles.get("instagram") else {}
+        fb_raw   = fetch_facebook(handles.get("facebook",""))   if handles.get("facebook")  else {}
+        yt_raw   = fetch_youtube(handles.get("youtube",""))     if handles.get("youtube")   else {}
+        li_raw   = fetch_linkedin(handles.get("linkedin",""))   if handles.get("linkedin")  else {}
         analysis = analyse_with_claude(website_url, handles, ig_raw, fb_raw, yt_raw, li_raw)
         ppt_path, safe_name = create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url)
         return jsonify({
