@@ -19,7 +19,6 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 app = Flask(__name__)
 
-# ── Colours ───────────────────────────────────────────────────
 NAVY   = RGBColor(0x0A, 0x19, 0x3C)
 NAVY2  = RGBColor(0x0E, 0x1E, 0x3A)
 GOLD   = RGBColor(0xD4, 0xAF, 0x37)
@@ -35,7 +34,7 @@ RED    = RGBColor(0xFF, 0x3B, 0x30)
 
 
 # ═══════════════════════════════════════════════════════════════
-# DISCOVER SOCIAL HANDLES FROM WEBSITE
+# STEP 1 — DISCOVER SOCIAL HANDLES
 # ═══════════════════════════════════════════════════════════════
 
 def clean_domain(url):
@@ -91,45 +90,111 @@ def find_handles_from_website(website_url):
             continue
     return all_handles
 
-def find_handles_from_google(website_url, missing_platforms):
+def find_handles_from_searchapi(website_url, missing_platforms):
     domain = website_url.replace("https://","").replace("http://","").rstrip("/")
+    brand  = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain).lower()
+    brand  = brand.replace("www.","")
     handles = {}
-    SKIP = {"p","explore","accounts","stories","reel","tv","share","sharer"}
-    platform_queries = {
-        "instagram": f'{domain} site:instagram.com',
-        "facebook":  f'{domain} site:facebook.com',
-        "linkedin":  f'{domain} site:linkedin.com/company',
-        "youtube":   f'{domain} site:youtube.com',
+    SKIP = {"p","explore","accounts","stories","reel","tv","share",
+            "sharer","login","signup","intent","home","search"}
+
+    print(f"   Brand detected: '{brand}' from domain: '{domain}'")
+
+    queries = {
+        "instagram": [
+            f'{domain} instagram',
+            f'"{brand}" instagram official account',
+        ],
+        "facebook": [
+            f'"{brand}" facebook official page',
+            f'{domain} facebook',
+        ],
+        "linkedin": [
+            f'"{brand}" site:linkedin.com/company',
+            f'{domain} linkedin',
+            f'"{brand}" linkedin company followers',
+        ],
+        "youtube": [
+            f'"{brand}" youtube channel official',
+            f'{domain} youtube',
+        ],
     }
+
     for platform in missing_platforms:
-        try:
-            r = requests.get(
-                "https://www.searchapi.io/api/v1/search",
-                params={"engine":"google","q":platform_queries[platform],
-                        "api_key":SEARCHAPI_KEY,"num":5}
-            )
-            if r.status_code != 200:
-                continue
-            for result in r.json().get("organic_results",[]):
-                link = result.get("link","")
-                if platform == "instagram" and "instagram.com" in link:
-                    m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)/?', link, re.I)
-                    if m and m.group(1).lower() not in SKIP:
-                        handles["instagram"] = m.group(1); break
-                elif platform == "facebook" and "facebook.com" in link:
-                    m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', link, re.I)
-                    if m and m.group(1).lower() not in SKIP:
-                        handles["facebook"] = m.group(1); break
-                elif platform == "linkedin" and "linkedin.com/company" in link:
-                    m = re.search(r'linkedin\.com/company/([A-Za-z0-9_.-]+)/?', link, re.I)
-                    if m:
-                        handles["linkedin"] = m.group(1); break
-                elif platform == "youtube" and "youtube.com" in link:
-                    m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', link, re.I)
-                    if m:
-                        handles["youtube"] = "@"+m.group(1); break
-        except Exception as e:
-            print(f"⚠️ Google handle search failed for {platform}: {e}")
+        found = False
+        for q in queries[platform]:
+            if found:
+                break
+            try:
+                print(f"   🔍 Searching: {q}")
+                r = requests.get(
+                    "https://www.searchapi.io/api/v1/search",
+                    params={"engine":"google","q":q,
+                            "api_key":SEARCHAPI_KEY,"num":5}
+                )
+                if r.status_code != 200:
+                    continue
+
+                results = r.json().get("organic_results",[])
+                for result in results:
+                    link    = result.get("link","")
+                    title   = result.get("title","").lower()
+                    snippet = result.get("snippet","").lower()
+
+                    brand_clean = brand.replace("-","").replace("_","").replace(" ","")
+
+                    def brand_match(text):
+                        text_clean = text.replace("-","").replace("_","").replace(" ","").lower()
+                        return brand_clean in text_clean
+
+                    if platform == "instagram" and "instagram.com" in link:
+                        m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)/?', link, re.I)
+                        if m:
+                            handle = m.group(1)
+                            if handle.lower() in SKIP:
+                                continue
+                            if brand_match(handle) or brand_match(title) or brand_match(snippet):
+                                handles["instagram"] = handle
+                                print(f"   ✅ Instagram: @{handle}")
+                                found = True; break
+
+                    elif platform == "facebook" and "facebook.com" in link:
+                        m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', link, re.I)
+                        if m:
+                            handle = m.group(1)
+                            if handle.lower() in SKIP:
+                                continue
+                            if brand_match(handle) or brand_match(title) or brand_match(snippet):
+                                handles["facebook"] = handle
+                                print(f"   ✅ Facebook: {handle}")
+                                found = True; break
+                            else:
+                                print(f"   ⚠️ Facebook skipped wrong brand: {handle}")
+
+                    elif platform == "linkedin" and "linkedin.com/company" in link:
+                        m = re.search(r'linkedin\.com/company/([A-Za-z0-9_.-]+)/?', link, re.I)
+                        if m:
+                            handle = m.group(1)
+                            handles["linkedin"] = handle
+                            print(f"   ✅ LinkedIn: {handle}")
+                            found = True; break
+
+                    elif platform == "youtube" and "youtube.com" in link:
+                        m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', link, re.I)
+                        if not m:
+                            m = re.search(r'youtube\.com/(?:channel|c|user)/([A-Za-z0-9_.]+)/?', link, re.I)
+                        if m:
+                            handle = m.group(1)
+                            if brand_match(handle) or brand_match(title) or brand_match(snippet):
+                                handles["youtube"] = "@"+handle
+                                print(f"   ✅ YouTube: @{handle}")
+                                found = True; break
+                            else:
+                                print(f"   ⚠️ YouTube skipped wrong channel: {handle}")
+
+            except Exception as e:
+                print(f"   ⚠️ SearchAPI failed for {platform}: {e}")
+
     return handles
 
 def discover_all_handles(website_url):
@@ -139,10 +204,10 @@ def discover_all_handles(website_url):
     missing = [p for p in ["instagram","facebook","linkedin","youtube"]
                if p not in handles]
     if missing:
-        print(f"   Searching Google for: {missing}")
-        google_handles = find_handles_from_google(website_url, missing)
+        print(f"   Searching for missing: {missing}")
+        google_handles = find_handles_from_searchapi(website_url, missing)
         handles.update(google_handles)
-        print(f"   After Google: {handles}")
+        print(f"   Final handles: {handles}")
     if not handles.get("instagram"):
         raise ValueError(
             f"Could not find any Instagram account for {website_url}. "
@@ -152,7 +217,7 @@ def discover_all_handles(website_url):
 
 
 # ═══════════════════════════════════════════════════════════════
-# FETCH DATA FROM EACH PLATFORM
+# STEP 2 — FETCH DATA FROM EACH PLATFORM
 # ═══════════════════════════════════════════════════════════════
 
 def fetch_instagram(username):
@@ -282,37 +347,135 @@ def fetch_youtube(channel_id):
     return data
 
 def fetch_linkedin(company_handle):
+    """
+    ── KEY FIX ──
+    Use company name (not handle) in search query.
+    Google shows "TalkingLands | 204 followers on LinkedIn"
+    when searching by name, not by handle slug.
+    """
     print(f"💼 Fetching LinkedIn: {company_handle}")
-    data = {}
-    try:
-        r = requests.get(
-            "https://www.searchapi.io/api/v1/search",
-            params={"engine":"google",
-                    "q":f'site:linkedin.com/company/{company_handle}',
-                    "api_key":SEARCHAPI_KEY,"num":3}
-        )
-        if r.status_code == 200:
-            results = r.json().get("organic_results",[])
-            if results:
-                snippet = results[0].get("snippet","")
-                title   = results[0].get("title","")
-                followers_match = re.search(r'([\d,]+)\s*followers', snippet, re.I)
-                employees_match = re.search(r'([\d,]+)\s*employees', snippet, re.I)
-                data = {
-                    "company":   title.replace("| LinkedIn","").strip(),
-                    "followers": followers_match.group(1) if followers_match else "N/A",
-                    "employees": employees_match.group(1) if employees_match else "N/A",
-                    "snippet":   snippet,
-                    "url":       f"https://www.linkedin.com/company/{company_handle}",
-                }
-                print(f"   ✅ {data['followers']} followers")
-    except Exception as e:
-        print(f"   ⚠️ LinkedIn failed: {e}")
+
+    # Convert handle to readable name e.g. "talking-lands" → "talking lands"
+    company_name = company_handle.replace("-", " ").replace("_", " ")
+
+    data = {
+        "company":   company_handle,
+        "followers": "N/A",
+        "employees": "N/A",
+        "snippet":   "",
+        "url":       f"https://www.linkedin.com/company/{company_handle}",
+    }
+
+    def extract_followers(text):
+        for pattern in [
+            r'([\d,]+\.?\d*[KMB]?\+?)\s*followers',
+            r'followers[:\s]+([\d,]+\.?\d*[KMB]?\+?)',
+            r'([\d,]+)\s*follow',
+        ]:
+            m = re.search(pattern, text, re.I)
+            if m:
+                return m.group(1).strip()
+        return None
+
+    def extract_employees(text):
+        for pattern in [
+            r'([\d,\-]+\.?\d*[KMB]?\+?)\s*employees',
+            r'employees[:\s]+([\d,\-]+)',
+            r'(\d+[-–]\d+)\s*employees',
+        ]:
+            m = re.search(pattern, text, re.I)
+            if m:
+                return m.group(1).strip()
+        return None
+
+    # ── KEY FIX: Use company name in queries, not just handle ──
+    queries = [
+        f'{company_name} linkedin followers',
+        f'"{company_name}" linkedin company followers',
+        f'site:linkedin.com/company/{company_handle}',
+        f'{company_name} site:linkedin.com followers',
+    ]
+
+    for q in queries:
+        try:
+            print(f"   🔍 LinkedIn query: {q}")
+            r = requests.get(
+                "https://www.searchapi.io/api/v1/search",
+                params={"engine":"google","q":q,
+                        "api_key":SEARCHAPI_KEY,"num":5}
+            )
+            if r.status_code != 200:
+                continue
+
+            result_json = r.json()
+
+            # ── Check knowledge graph ──────────────────────────
+            kg = result_json.get("knowledge_graph", {})
+            if kg:
+                kg_str = json.dumps(kg)
+                f = extract_followers(kg_str)
+                e = extract_employees(kg_str)
+                if f and data["followers"] == "N/A":
+                    data["followers"] = f
+                    print(f"   ✅ KG followers: {f}")
+                if e and data["employees"] == "N/A":
+                    data["employees"] = e
+
+            # ── Check answer box ──────────────────────────────
+            ab = result_json.get("answer_box", {})
+            if ab:
+                ab_str = json.dumps(ab)
+                f = extract_followers(ab_str)
+                if f and data["followers"] == "N/A":
+                    data["followers"] = f
+                    print(f"   ✅ Answer box followers: {f}")
+
+            # ── Check all organic results ──────────────────────
+            for res in result_json.get("organic_results", []):
+                link    = res.get("link","")
+                snippet = res.get("snippet","")
+                title   = res.get("title","")
+
+                # Build combined text including sitelinks
+                all_text = f"{title} {snippet}"
+                sitelinks = res.get("sitelinks", [])
+                if isinstance(sitelinks, list):
+                    for sl in sitelinks:
+                        all_text += f" {sl.get('title','')} {sl.get('snippet','')}"
+                elif isinstance(sitelinks, dict):
+                    all_text += json.dumps(sitelinks)
+
+                print(f"   text: {all_text[:120]}")
+
+                f = extract_followers(all_text)
+                e = extract_employees(all_text)
+
+                if f and data["followers"] == "N/A":
+                    data["followers"] = f
+                    print(f"   ✅ Followers: {f}")
+                if e and data["employees"] == "N/A":
+                    data["employees"] = e
+
+                if "linkedin.com/company" in link:
+                    if not data.get("snippet"):
+                        data["snippet"] = snippet
+                    if title:
+                        data["company"] = title.replace("| LinkedIn","").replace("LinkedIn","").strip()
+
+            # Stop as soon as we find followers
+            if data["followers"] != "N/A":
+                print(f"   ✅ LinkedIn final: {data['followers']} followers | {data['employees']} employees")
+                return data
+
+        except Exception as e:
+            print(f"   ⚠️ LinkedIn query failed: {e}")
+
+    print(f"   LinkedIn result: {data['followers']} followers | {data['employees']} employees")
     return data
 
 
 # ═══════════════════════════════════════════════════════════════
-# CLAUDE ANALYSIS
+# STEP 3 — CLAUDE ANALYSIS
 # ═══════════════════════════════════════════════════════════════
 
 def analyse_with_claude(website_url, handles, ig, fb, yt, li):
@@ -335,7 +498,7 @@ YOUTUBE DATA:
 LINKEDIN DATA:
 {json.dumps(li, indent=2)}
 
-Return ONLY a JSON object with this exact structure:
+Return ONLY a JSON object:
 {{
   "brand_name": "brand name",
   "niche": "3-5 words describing the brand",
@@ -405,7 +568,7 @@ Use EXACT numbers from data — never write N/A if data exists.
 
 
 # ═══════════════════════════════════════════════════════════════
-# PPT HELPERS
+# STEP 4 — PPT HELPERS
 # ═══════════════════════════════════════════════════════════════
 
 def bg(slide, prs, color=None):
@@ -439,11 +602,9 @@ def stat_card(slide, x, y, w, h, label, value, accent):
        size=10, color=LIGHT, align=PP_ALIGN.CENTER)
 
 def slide_title(slide, title, subtitle=None):
-    tb(slide, title, 0.5, 0.15, 12.3, 0.65,
-       size=28, bold=True, color=GOLD)
+    tb(slide, title, 0.5, 0.15, 12.3, 0.65, size=28, bold=True, color=GOLD)
     if subtitle:
-        tb(slide, subtitle, 0.5, 0.75, 12.3, 0.35,
-           size=12, color=LIGHT, italic=True)
+        tb(slide, subtitle, 0.5, 0.75, 12.3, 0.35, size=12, color=LIGHT, italic=True)
 
 def add_table(slide, headers, rows, x, y, w, h):
     cols = len(headers)
@@ -471,14 +632,12 @@ def add_table(slide, headers, rows, x, y, w, h):
 
 def insight_card(slide, x, y, w, h, title, body, accent):
     rect(slide, x, y, w, h, NAVY2, accent)
-    tb(slide, title, x+0.15, y+0.1, w-0.3, 0.35,
-       size=12, bold=True, color=accent)
-    tb(slide, body, x+0.15, y+0.45, w-0.3, h-0.55,
-       size=11, color=WHITE)
+    tb(slide, title, x+0.15, y+0.1, w-0.3, 0.35, size=12, bold=True, color=accent)
+    tb(slide, body,  x+0.15, y+0.45, w-0.3, h-0.55, size=11, color=WHITE)
 
 
 # ═══════════════════════════════════════════════════════════════
-# BUILD 14-SLIDE PPT
+# STEP 5 — BUILD 14-SLIDE PPT
 # ═══════════════════════════════════════════════════════════════
 
 def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
@@ -612,7 +771,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["Email",   str(fb_raw.get("email","N/A")   or "N/A")],
         ["Website", str(fb_raw.get("website","N/A") or "N/A")],
     ], 0.5, 3.7, 6.0, 2.5)
-    insight_card(s, 6.8, 3.7,  5.9, 1.1, "💡 Strength",       fb.get("strength","N/A"),       BLUE)
+    insight_card(s, 6.8, 3.7,  5.9, 1.1, "💡 Strength",       fb.get("strength","N/A"), BLUE)
     insight_card(s, 6.8, 5.05, 5.9, 1.1, "🎯 Recommendation", fb.get("recommendation","N/A"), GOLD)
 
     # ── SLIDE 7: YouTube Stat Cards ───────────────────────────
@@ -638,7 +797,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     tb(s, "CHANNEL DESCRIPTION", 0.75, 1.4, 6, 0.35, size=11, bold=True, color=RED)
     tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:300],
        0.75, 1.8, 11.8, 1.3, size=13, color=WHITE)
-    insight_card(s, 0.5,  3.55, 6.0, 1.4, "💡 Strength",       yt.get("strength","N/A"),       RED)
+    insight_card(s, 0.5,  3.55, 6.0, 1.4, "💡 Strength",       yt.get("strength","N/A"), RED)
     insight_card(s, 6.85, 3.55, 5.9, 1.4, "🎯 Recommendation", yt.get("recommendation","N/A"), GOLD)
     add_table(s, ["Metric","Value"], [
         ["Subscribers",  yt.get("subscribers","N/A")],
@@ -669,7 +828,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     rect(s, 0.5, 4.0, 12.3, 2.1, NAVY2, TEAL)
     tb(s, "COMPANY SUMMARY", 0.75, 4.1, 5, 0.35, size=11, bold=True, color=TEAL)
     tb(s, li.get("summary","N/A"), 0.75, 4.5, 11.8, 1.4, size=13, color=WHITE)
-    insight_card(s, 0.5,  6.3, 6.0, 0.9, "💡 Strength",       li.get("strength","N/A"),       TEAL)
+    insight_card(s, 0.5,  6.3, 6.0, 0.9, "💡 Strength",       li.get("strength","N/A"), TEAL)
     insight_card(s, 6.85, 6.3, 5.9, 0.9, "🎯 Recommendation", li.get("recommendation","N/A"), GOLD)
 
     # ── SLIDE 10: LinkedIn Insights ───────────────────────────
@@ -683,7 +842,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["Best Post Type","Articles & Updates",       "Highest LinkedIn engagement"],
         ["Posting Freq.", "2-3x per week",            "LinkedIn best practice"],
     ], 0.5, 1.3, 12.3, 4.0)
-    insight_card(s, 0.5,  5.55, 6.0, 1.65, "💡 Strength",       li.get("strength","N/A"),       TEAL)
+    insight_card(s, 0.5,  5.55, 6.0, 1.65, "💡 Strength",       li.get("strength","N/A"), TEAL)
     insight_card(s, 6.85, 5.55, 5.9, 1.65, "🎯 Recommendation", li.get("recommendation","N/A"), GOLD)
 
     # ── SLIDE 11: Cross-Platform Comparison ───────────────────
@@ -692,7 +851,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     slide_title(s, "📊  Cross-Platform Follower Comparison", "Audience size across all platforms")
     def parse_num(val):
         try:
-            v = str(val).replace(",","").upper()
+            v = str(val).replace(",","").upper().replace("+","")
             if "M" in v: return float(v.replace("M","")) * 1_000_000
             if "K" in v: return float(v.replace("K","")) * 1_000
             return float(v)
@@ -781,7 +940,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     tb(s, f"Report for {brand} ({website_url})  •  SearchAPI.io + Claude AI",
        0.5, 7.1, 12.3, 0.3, size=10, color=LIGHT, align=PP_ALIGN.CENTER, italic=True)
 
-    # ── Save ──────────────────────────────────────────────────
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
     safe_name  = re.sub(r'[^A-Za-z0-9_]', '_',
