@@ -43,6 +43,11 @@ def clean_domain(url):
         url = "https://" + url
     return url
 
+def is_youtube_channel_id(handle):
+    """Channel IDs look like UCiw5nQveZSa9HIhgQfhTOgw — start with UC, ~24 chars."""
+    raw = handle.lstrip("@")
+    return raw.startswith("UC") and len(raw) >= 20
+
 def extract_social_from_html(html):
     soup = BeautifulSoup(html, "html.parser")
     handles = {}
@@ -56,7 +61,7 @@ def extract_social_from_html(html):
             if m and m.group(1).lower() not in SKIP:
                 handles["instagram"] = m.group(1)
 
-        # ── FIX: Skip profile.php Facebook URLs ──────────────
+        # ── Skip profile.php Facebook URLs ────────────────────
         if "facebook.com" in href and "facebook" not in handles:
             if "profile.php" not in href:
                 m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', href, re.I)
@@ -73,7 +78,8 @@ def extract_social_from_html(html):
             if m:
                 handles["youtube"] = "@" + m.group(1)
             else:
-                m = re.search(r'youtube\.com/(?:channel|c|user)/([A-Za-z0-9_.]+)/?', href, re.I)
+                # Channel IDs (UC...) stay raw — no @ prefix
+                m = re.search(r'youtube\.com/(?:channel|c|user)/([A-Za-z0-9_.-]+)/?', href, re.I)
                 if m:
                     handles["youtube"] = m.group(1)
     return handles
@@ -186,7 +192,7 @@ def find_handles_from_searchapi(website_url, missing_platforms):
 
                     # ── Facebook ──────────────────────────────
                     elif platform == "facebook" and "facebook.com" in link:
-                        # ── FIX: Skip profile.php URLs ────────
+                        # ── Skip profile.php URLs ─────────────
                         if "profile.php" in link:
                             print(f"   ⚠️ Facebook skipped profile.php")
                             continue
@@ -214,12 +220,16 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                     elif platform == "youtube" and "youtube.com" in link:
                         m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', link, re.I)
                         if not m:
-                            m = re.search(r'youtube\.com/(?:channel|c|user)/([A-Za-z0-9_.]+)/?', link, re.I)
+                            m = re.search(r'youtube\.com/(?:channel|c|user)/([A-Za-z0-9_.-]+)/?', link, re.I)
                         if m:
                             handle = m.group(1)
                             if brand_match(handle) or brand_match(title) or brand_match(snippet):
-                                handles["youtube"] = "@"+handle
-                                print(f"   ✅ YouTube: @{handle}")
+                                # ── FIX: Channel IDs (UC...) stay raw, names get @ ──
+                                if is_youtube_channel_id(handle):
+                                    handles["youtube"] = handle.lstrip("@")
+                                else:
+                                    handles["youtube"] = "@" + handle.lstrip("@")
+                                print(f"   ✅ YouTube: {handles['youtube']}")
                                 found = True; break
                             else:
                                 print(f"   ⚠️ YouTube skipped: {handle}")
@@ -355,10 +365,21 @@ def fetch_facebook(username):
 def fetch_youtube(channel_id):
     print(f"▶️  Fetching YouTube: {channel_id}")
     data = {}
+
+    # ── FIX: Normalize the format ──────────────────────────────
+    # Channel IDs (UCiw5nQveZSa9HIhgQfhTOgw) must NOT have @
+    # Handles (probe42) MUST have @
+    raw = channel_id.strip().lstrip("@")
+    if raw.startswith("UC") and len(raw) >= 20:
+        param = raw            # channel ID format — no @
+    else:
+        param = "@" + raw      # handle format — with @
+    print(f"   Using param: {param}")
+
     try:
         r = requests.get(
             "https://www.searchapi.io/api/v1/search",
-            params={"engine":"youtube_channel","channel_id":channel_id,
+            params={"engine":"youtube_channel","channel_id":param,
                     "api_key":SEARCHAPI_KEY}
         )
         if r.status_code == 200:
