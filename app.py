@@ -224,7 +224,7 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                         if m:
                             handle = m.group(1)
                             if brand_match(handle) or brand_match(title) or brand_match(snippet):
-                                # ── FIX: Channel IDs (UC...) stay raw, names get @ ──
+                                # Channel IDs (UC...) stay raw, names get @
                                 if is_youtube_channel_id(handle):
                                     handles["youtube"] = handle.lstrip("@")
                                 else:
@@ -239,6 +239,28 @@ def find_handles_from_searchapi(website_url, missing_platforms):
 
     return handles
 
+def find_youtube_via_engine(brand):
+    """Fallback: search YouTube directly to find the brand's channel ID."""
+    try:
+        print(f"   🔍 YouTube engine search: {brand}")
+        r = requests.get(
+            "https://www.searchapi.io/api/v1/search",
+            params={"engine":"youtube","q":brand,"api_key":SEARCHAPI_KEY}
+        )
+        if r.status_code != 200:
+            return None
+        brand_clean = brand.replace("-","").replace("_","").replace(" ","").lower()
+        for video in r.json().get("videos", [])[:5]:
+            ch = video.get("channel", {})
+            ch_id    = ch.get("id","")
+            ch_title = ch.get("title","").replace(" ","").replace("-","").lower()
+            if ch_id and brand_clean in ch_title:
+                print(f"   ✅ YouTube via engine: {ch.get('title')} ({ch_id})")
+                return ch_id
+    except Exception as e:
+        print(f"   ⚠️ YouTube engine search failed: {e}")
+    return None
+
 def discover_all_handles(website_url):
     print(f"\n🔎 Finding all social handles for: {website_url}")
     handles = find_handles_from_website(website_url)
@@ -250,6 +272,15 @@ def discover_all_handles(website_url):
         google_handles = find_handles_from_searchapi(website_url, missing)
         handles.update(google_handles)
         print(f"   Final handles: {handles}")
+
+    # ── YouTube fallback: search YouTube directly if still missing ──
+    if "youtube" not in handles:
+        domain = website_url.replace("https://","").replace("http://","").rstrip("/")
+        brand  = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain).replace("www.","")
+        yt_id = find_youtube_via_engine(brand)
+        if yt_id:
+            handles["youtube"] = yt_id
+            print(f"   Final handles: {handles}")
 
     # Don't require all platforms — just need at least one
     if not handles:
@@ -366,7 +397,7 @@ def fetch_youtube(channel_id):
     print(f"▶️  Fetching YouTube: {channel_id}")
     data = {}
 
-    # ── FIX: Normalize the format ──────────────────────────────
+    # ── Normalize the format ────────────────────────────────────
     # Channel IDs (UCiw5nQveZSa9HIhgQfhTOgw) must NOT have @
     # Handles (probe42) MUST have @
     raw = channel_id.strip().lstrip("@")
