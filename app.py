@@ -19,18 +19,27 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 app = Flask(__name__)
 
-NAVY   = RGBColor(0x0A, 0x19, 0x3C)
-NAVY2  = RGBColor(0x0E, 0x1E, 0x3A)
-GOLD   = RGBColor(0xD4, 0xAF, 0x37)
-WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
-LIGHT  = RGBColor(0xC8, 0xD2, 0xE6)
-GREEN  = RGBColor(0x2E, 0xCC, 0x71)
-PURPLE = RGBColor(0x8E, 0x44, 0xAD)
-TEAL   = RGBColor(0x16, 0xA0, 0x85)
-ORANGE = RGBColor(0xE6, 0x7E, 0x22)
-DARK   = RGBColor(0x05, 0x0C, 0x1A)
-BLUE   = RGBColor(0x1A, 0x5A, 0xFF)
-RED    = RGBColor(0xFF, 0x3B, 0x30)
+# ═══════════════════════════════════════════════════════════════
+# MIDNIGHT PANDA BRAND DESIGN TOKENS
+# ═══════════════════════════════════════════════════════════════
+
+BG_DARK        = RGBColor(0x0A, 0x0A, 0x0A)
+BG_LIGHT       = RGBColor(0xF5, 0xF3, 0xEF)
+GOLD           = RGBColor(0xB8, 0x94, 0x5A)
+CARD_LIGHT     = RGBColor(0xEC, 0xE9, 0xE2)
+CARD_DARK      = RGBColor(0x1A, 0x1A, 0x1A)
+TEXT_DARK      = RGBColor(0x0A, 0x0A, 0x0A)
+TEXT_LIGHT     = RGBColor(0xF5, 0xF3, 0xEF)
+TEXT_GRAY      = RGBColor(0x66, 0x66, 0x66)
+TEXT_GRAY_LT   = RGBColor(0xD0, 0xCF, 0xC9)
+TEXT_FOOTER    = RGBColor(0x99, 0x99, 0x99)
+PIE_TAN        = RGBColor(0xD9, 0xC4, 0xA0)
+
+FONT_MONO      = "DM Mono"
+FONT_MONO_MED  = "DM Mono Medium"
+FONT_MONO_LT   = "DM Mono Light"
+FONT_SERIF     = "Playfair Display Black"
+FONT_STAT      = "Bebas Neue"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -61,7 +70,6 @@ def extract_social_from_html(html):
             if m and m.group(1).lower() not in SKIP:
                 handles["instagram"] = m.group(1)
 
-        # ── Skip profile.php Facebook URLs ────────────────────
         if "facebook.com" in href and "facebook" not in handles:
             if "profile.php" not in href:
                 m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', href, re.I)
@@ -78,7 +86,6 @@ def extract_social_from_html(html):
             if m:
                 handles["youtube"] = "@" + m.group(1)
             else:
-                # Channel IDs (UC...) stay raw — no @ prefix
                 m = re.search(r'youtube\.com/(?:channel|c|user)/([A-Za-z0-9_.-]+)/?', href, re.I)
                 if m:
                     handles["youtube"] = m.group(1)
@@ -110,7 +117,6 @@ def find_handles_from_searchapi(website_url, missing_platforms):
     SKIP = {"p","explore","accounts","stories","reel","tv","share",
             "sharer","login","signup","intent","home","search"}
 
-    # Extract all meaningful words from brand for flexible matching
     brand_words = re.split(r'[-_.]', brand)
     print(f"   Brand: '{brand}' | Words: {brand_words} | Domain: '{domain}'")
 
@@ -158,19 +164,15 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                     snippet = result.get("snippet","").lower()
 
                     def brand_match(text):
-                        """Check if ANY brand word appears in text."""
                         text_clean = text.replace("-","").replace("_","").replace(" ","").lower()
                         brand_clean = brand.replace("-","").replace("_","").replace(" ","")
-                        # Full brand match
                         if brand_clean in text_clean:
                             return True
-                        # Any individual word match (for brands like "talla jewellers")
                         for word in brand_words:
                             if len(word) > 3 and word in text_clean:
                                 return True
                         return False
 
-                    # ── Instagram ─────────────────────────────
                     if platform == "instagram" and "instagram.com" in link:
                         m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)/?', link, re.I)
                         if m:
@@ -181,7 +183,6 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                                 handles["instagram"] = handle
                                 print(f"   ✅ Instagram: @{handle}")
                                 found = True; break
-                            # Accept first result if it's top result and domain matches
                             elif idx == 0 and (domain.replace("www.","").split(".")[0] in handle.lower()
                                                or brand.split("-")[0] in handle.lower()):
                                 handles["instagram"] = handle
@@ -190,9 +191,7 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                             else:
                                 print(f"   ⚠️ Instagram skipped: @{handle}")
 
-                    # ── Facebook ──────────────────────────────
                     elif platform == "facebook" and "facebook.com" in link:
-                        # ── Skip profile.php URLs ─────────────
                         if "profile.php" in link:
                             print(f"   ⚠️ Facebook skipped profile.php")
                             continue
@@ -208,7 +207,6 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                             else:
                                 print(f"   ⚠️ Facebook skipped wrong brand: {handle}")
 
-                    # ── LinkedIn ──────────────────────────────
                     elif platform == "linkedin" and "linkedin.com/company" in link:
                         m = re.search(r'linkedin\.com/company/([A-Za-z0-9_.-]+)/?', link, re.I)
                         if m:
@@ -216,7 +214,6 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                             print(f"   ✅ LinkedIn: {m.group(1)}")
                             found = True; break
 
-                    # ── YouTube ───────────────────────────────
                     elif platform == "youtube" and "youtube.com" in link:
                         m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', link, re.I)
                         if not m:
@@ -224,7 +221,6 @@ def find_handles_from_searchapi(website_url, missing_platforms):
                         if m:
                             handle = m.group(1)
                             if brand_match(handle) or brand_match(title) or brand_match(snippet):
-                                # Channel IDs (UC...) stay raw, names get @
                                 if is_youtube_channel_id(handle):
                                     handles["youtube"] = handle.lstrip("@")
                                 else:
@@ -240,7 +236,6 @@ def find_handles_from_searchapi(website_url, missing_platforms):
     return handles
 
 def find_youtube_via_engine(brand):
-    """Fallback: search YouTube directly to find the brand's channel ID."""
     try:
         print(f"   🔍 YouTube engine search: {brand}")
         r = requests.get(
@@ -273,7 +268,6 @@ def discover_all_handles(website_url):
         handles.update(google_handles)
         print(f"   Final handles: {handles}")
 
-    # ── YouTube fallback: search YouTube directly if still missing ──
     if "youtube" not in handles:
         domain = website_url.replace("https://","").replace("http://","").rstrip("/")
         brand  = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain).replace("www.","")
@@ -282,7 +276,6 @@ def discover_all_handles(website_url):
             handles["youtube"] = yt_id
             print(f"   Final handles: {handles}")
 
-    # Don't require all platforms — just need at least one
     if not handles:
         raise ValueError(
             f"Could not find any social media accounts for {website_url}. "
@@ -396,15 +389,11 @@ def fetch_facebook(username):
 def fetch_youtube(channel_id):
     print(f"▶️  Fetching YouTube: {channel_id}")
     data = {}
-
-    # ── Normalize the format ────────────────────────────────────
-    # Channel IDs (UCiw5nQveZSa9HIhgQfhTOgw) must NOT have @
-    # Handles (probe42) MUST have @
     raw = channel_id.strip().lstrip("@")
     if raw.startswith("UC") and len(raw) >= 20:
-        param = raw            # channel ID format — no @
+        param = raw
     else:
-        param = "@" + raw      # handle format — with @
+        param = "@" + raw
     print(f"   Using param: {param}")
 
     try:
@@ -432,7 +421,7 @@ def fetch_youtube(channel_id):
         print(f"   ⚠️ YouTube failed: {e}")
     return data
 
-def fetch_linkedin(company_handle):
+def fetch_linkedin(company_handle, brand_name=None):
     print(f"💼 Fetching LinkedIn: {company_handle}")
     company_name = company_handle.replace("-"," ").replace("_"," ")
     data = {
@@ -465,12 +454,12 @@ def fetch_linkedin(company_handle):
                 return m.group(1).strip()
         return None
 
-    queries = [
-        f'{company_name} linkedin followers',
-        f'"{company_name}" linkedin company followers',
-        f'site:linkedin.com/company/{company_handle}',
-        f'{company_name} site:linkedin.com followers',
-    ]
+    queries = [f'{company_name} linkedin followers']
+    if brand_name and brand_name.lower() != company_name.lower():
+        queries.append(f'{brand_name} linkedin followers')
+        queries.append(f'"{brand_name}" linkedin company followers')
+    queries.append(f'site:linkedin.com/company/{company_handle}')
+    queries.append(f'{company_name} site:linkedin.com followers')
 
     for q in queries:
         try:
@@ -620,76 +609,112 @@ Use EXACT numbers from data — never write N/A if data exists.
 
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 4 — PPT HELPERS
+# STEP 4 — MIDNIGHT PANDA BRANDED PPT HELPERS
 # ═══════════════════════════════════════════════════════════════
 
-def bg(slide, prs, color=None):
-    c = color or NAVY
+def bg(slide, prs, color):
     s = slide.shapes.add_shape(1, 0, 0, prs.slide_width, prs.slide_height)
-    s.fill.solid(); s.fill.fore_color.rgb = c; s.line.fill.background()
+    s.fill.solid(); s.fill.fore_color.rgb = color; s.line.fill.background()
 
-def tb(slide, text, x, y, w, h, size=14, bold=False,
-       color=WHITE, align=PP_ALIGN.LEFT, italic=False):
+def tb(slide, text, x, y, w, h, size=14, bold=False, color=TEXT_DARK,
+       align=PP_ALIGN.LEFT, font=FONT_MONO, italic=False, line_spacing=None):
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf  = box.text_frame; tf.word_wrap = True
     p   = tf.paragraphs[0]
     p.text = str(text); p.alignment = align
     p.font.size = Pt(size); p.font.bold = bold
     p.font.color.rgb = color; p.font.italic = italic
+    p.font.name = font
+    if line_spacing:
+        p.line_spacing = line_spacing
     return box
 
-def rect(slide, x, y, w, h, fill, line=None):
-    s = slide.shapes.add_shape(1, Inches(x), Inches(y), Inches(w), Inches(h))
-    s.fill.solid(); s.fill.fore_color.rgb = fill
-    if line: s.line.color.rgb = line; s.line.width = Pt(1)
-    else: s.line.fill.background()
+def brand_mark(slide, dark_bg=False):
+    """Two-dot logo mark + MIDNIGHT PANDA wordmark, top-left."""
+    outer = TEXT_LIGHT if dark_bg else TEXT_DARK
+    inner = TEXT_DARK if dark_bg else TEXT_LIGHT
+    for ox in [0.55, 0.79]:
+        c1 = slide.shapes.add_shape(9, Inches(ox), Inches(0.45), Inches(0.16), Inches(0.16))
+        c1.fill.solid(); c1.fill.fore_color.rgb = outer; c1.line.fill.background()
+        c2 = slide.shapes.add_shape(9, Inches(ox+0.05), Inches(0.50), Inches(0.05), Inches(0.05))
+        c2.fill.solid(); c2.fill.fore_color.rgb = inner; c2.line.fill.background()
+    tb(slide, "MIDNIGHT PANDA", 1.08, 0.42, 2.20, 0.32, size=9.5, color=outer, font=FONT_MONO)
 
-def stat_card(slide, x, y, w, h, label, value, accent):
-    rect(slide, x, y, w, h, NAVY2, accent)
-    s = slide.shapes.add_shape(1, Inches(x), Inches(y), Inches(w), Inches(0.06))
-    s.fill.solid(); s.fill.fore_color.rgb = accent; s.line.fill.background()
-    tb(slide, str(value), x+0.1, y+0.15, w-0.2, h*0.52,
-       size=22, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-    tb(slide, label, x+0.08, y+h*0.6, w-0.16, h*0.35,
-       size=10, color=LIGHT, align=PP_ALIGN.CENTER)
+def footer_bar(slide, page_num, dark_bg=False):
+    line_color = RGBColor(0x2A,0x2A,0x2A) if dark_bg else RGBColor(0xD8,0xD5,0xCC)
+    ln = slide.shapes.add_shape(1, Inches(0), Inches(7.46), Inches(13.33), Pt(0.75))
+    ln.fill.solid(); ln.fill.fore_color.rgb = line_color; ln.line.fill.background()
+    tb(slide, "MIDNIGHTPANDA.AI · SOCIAL INTELLIGENCE", 0.55, 7.08, 5.00, 0.30,
+       size=8.5, color=TEXT_FOOTER, font=FONT_MONO)
+    tb(slide, f"{page_num:02d} / 14", 11.93, 7.08, 0.85, 0.30,
+       size=8.5, color=TEXT_FOOTER, font=FONT_MONO, align=PP_ALIGN.RIGHT)
 
-def slide_title(slide, title, subtitle=None):
-    tb(slide, title, 0.5, 0.15, 12.3, 0.65, size=28, bold=True, color=GOLD)
+def kicker_header(slide, kicker, title, subtitle, dark_bg=False):
+    title_color = TEXT_LIGHT if dark_bg else TEXT_DARK
+    sub_color   = TEXT_GRAY_LT if dark_bg else TEXT_GRAY
+    tb(slide, kicker.upper(), 0.55, 0.42, 8.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
+    tb(slide, title, 0.55, 0.72, 11.50, 0.65, size=26, color=title_color, font=FONT_SERIF)
     if subtitle:
-        tb(slide, subtitle, 0.5, 0.75, 12.3, 0.35, size=12, color=LIGHT, italic=True)
+        tb(slide, subtitle, 0.55, 1.34, 11.50, 0.35, size=13, color=sub_color, font=FONT_MONO_LT)
 
-def add_table(slide, headers, rows, x, y, w, h):
+def stat_block(slide, x, y, w, value, label, size=54, dark_bg=False):
+    label_color = TEXT_GRAY_LT if dark_bg else TEXT_GRAY
+    vh = 0.85 if size >= 54 else 0.55
+    tb(slide, value, x, y, w, vh, size=size, color=GOLD, font=FONT_STAT)
+    tb(slide, label.upper(), x, y+vh, w, 0.30, size=9.5, color=label_color, font=FONT_MONO)
+
+def pill(slide, x, y, text):
+    w, h = 1.90, 0.50
+    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
+    r.fill.solid(); r.fill.fore_color.rgb = CARD_DARK; r.line.fill.background()
+    try: r.adjustments[0] = 0.5
+    except: pass
+    tb(slide, text, x, y+0.09, w, 0.32, size=11, color=TEXT_LIGHT, font=FONT_MONO, align=PP_ALIGN.CENTER)
+
+def card(slide, x, y, w, h, label, body, dark_bg=False):
+    fill_color = CARD_DARK if dark_bg else CARD_LIGHT
+    body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
+    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
+    r.fill.solid(); r.fill.fore_color.rgb = fill_color; r.line.fill.background()
+    try: r.adjustments[0] = 0.06
+    except: pass
+    tb(slide, label.upper(), x+0.28, y+0.18, w-0.56, 0.30, size=10.5, color=GOLD, font=FONT_MONO_MED)
+    tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=12.5, color=body_color,
+       font=FONT_MONO_LT, line_spacing=1.15)
+
+def branded_table(slide, headers, rows, x, y, w, h):
     cols = len(headers)
-    tbl  = slide.shapes.add_table(
-        len(rows)+1, cols, Inches(x), Inches(y), Inches(w), Inches(h)
-    ).table
+    tbl  = slide.shapes.add_table(len(rows)+1, cols, Inches(x), Inches(y), Inches(w), Inches(h)).table
+    try:
+        tbl.first_row = False
+        tbl.horz_banding = False
+    except: pass
     cw = Inches(w/cols)
     for i in range(cols): tbl.columns[i].width = cw
     for ci, hdr in enumerate(headers):
         cell = tbl.cell(0, ci)
         cell.text = hdr
-        cell.fill.solid(); cell.fill.fore_color.rgb = GOLD
+        cell.fill.solid(); cell.fill.fore_color.rgb = BG_DARK
         p = cell.text_frame.paragraphs[0]
-        p.font.bold = True; p.font.size = Pt(12)
-        p.font.color.rgb = DARK; p.alignment = PP_ALIGN.CENTER
+        p.font.bold = True; p.font.size = Pt(13); p.font.name = FONT_MONO_MED
+        p.font.color.rgb = TEXT_LIGHT
+        p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
+        cell.margin_left = Inches(0.12)
     for ri, row in enumerate(rows):
-        fc = NAVY2 if ri%2==0 else DARK
         for ci, val in enumerate(row):
             cell = tbl.cell(ri+1, ci)
             cell.text = str(val)
-            cell.fill.solid(); cell.fill.fore_color.rgb = fc
+            cell.fill.solid(); cell.fill.fore_color.rgb = BG_LIGHT
             p = cell.text_frame.paragraphs[0]
-            p.font.size = Pt(11); p.font.color.rgb = WHITE
-            p.alignment = PP_ALIGN.CENTER
-
-def insight_card(slide, x, y, w, h, title, body, accent):
-    rect(slide, x, y, w, h, NAVY2, accent)
-    tb(slide, title, x+0.15, y+0.1, w-0.3, 0.35, size=12, bold=True, color=accent)
-    tb(slide, body,  x+0.15, y+0.45, w-0.3, h-0.55, size=11, color=WHITE)
+            p.font.size = Pt(13); p.font.name = FONT_MONO
+            p.font.color.rgb = TEXT_DARK
+            p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
+            cell.margin_left = Inches(0.12)
+    return tbl
 
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — BUILD 14-SLIDE PPT
+# STEP 5 — BUILD 14-SLIDE MIDNIGHT PANDA BRANDED PPT
 # ═══════════════════════════════════════════════════════════════
 
 def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
@@ -706,176 +731,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     brand = analysis.get("brand_name", website_url)
     niche = analysis.get("niche", "")
 
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, DARK)
-    circ = s.shapes.add_shape(9, Inches(9.8), Inches(-2), Inches(6), Inches(6))
-    circ.fill.solid(); circ.fill.fore_color.rgb = RGBColor(0x12,0x24,0x4A)
-    circ.line.fill.background()
-    tb(s, "SOCIAL MEDIA INTELLIGENCE REPORT", 0.7, 1.2, 10, 0.5, size=12, bold=True, color=GOLD, italic=True)
-    tb(s, brand, 0.7, 1.75, 10, 1.1, size=42, bold=True, color=WHITE)
-    tb(s, niche, 0.7, 2.85, 9, 0.45, size=16, color=GOLD, italic=True)
-    tb(s, f"🌐  {website_url}", 0.7, 3.4, 9, 0.4, size=13, color=LIGHT)
-    platforms_found = []
-    if handles.get("instagram"): platforms_found.append(("📸 Instagram", GREEN))
-    if handles.get("facebook"):  platforms_found.append(("👥 Facebook",  BLUE))
-    if handles.get("youtube"):   platforms_found.append(("▶️  YouTube",   RED))
-    if handles.get("linkedin"):  platforms_found.append(("💼 LinkedIn",  TEAL))
-    for i, (label, col) in enumerate(platforms_found):
-        rect(s, 0.7+i*3.15, 4.05, 2.9, 0.5, NAVY2, col)
-        tb(s, label, 0.85+i*3.15, 4.12, 2.6, 0.36, size=13, bold=True, color=WHITE)
-    for i, (lbl, val, col) in enumerate([
-        ("INSTAGRAM FOLLOWERS", ig.get("followers","N/A"), GREEN),
-        ("FACEBOOK FOLLOWERS",  fb.get("followers","N/A"), BLUE),
-        ("YOUTUBE SUBSCRIBERS", yt.get("subscribers","N/A"), RED),
-    ]):
-        stat_card(s, 0.7+i*4.1, 4.8, 3.8, 1.5, lbl, val, col)
-    tb(s, f"Powered by SearchAPI.io + Claude AI  •  {website_url}",
-       0.7, 7.1, 12, 0.3, size=10, color=LIGHT, italic=True, align=PP_ALIGN.CENTER)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "Social Media Overview", f"{brand}  —  All platforms at a glance")
-    add_table(s, ["Platform","Handle","Followers/Subscribers","Key Metric","Status"], [
-        ["📸 Instagram", f"@{handles.get('instagram','N/A')}", ig.get("followers","N/A"), f"ER: {ig.get('engagement_rate','N/A')}", "✅ Active" if handles.get("instagram") else "❌ Not Found"],
-        ["👥 Facebook",  handles.get("facebook","N/A"),        fb.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",      "✅ Active" if handles.get("facebook") else "❌ Not Found"],
-        ["▶️ YouTube",   handles.get("youtube","N/A"),          yt.get("subscribers","N/A"), f"Videos: {yt.get('videos','N/A')}",   "✅ Active" if handles.get("youtube") else "❌ Not Found"],
-        ["💼 LinkedIn",  handles.get("linkedin","N/A"),         li.get("followers","N/A"), f"Employees: {li.get('employees','N/A')}", "✅ Active" if handles.get("linkedin") else "❌ Not Found"],
-    ], 0.5, 1.3, 12.3, 3.5)
-    rect(s, 0.5, 5.1, 12.3, 1.8, NAVY2, GOLD)
-    tb(s, "OVERALL ANALYSIS", 0.75, 5.2, 5, 0.35, size=11, bold=True, color=GOLD)
-    tb(s, analysis.get("overall_summary",""), 0.75, 5.6, 11.8, 1.1, size=13, color=WHITE)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "📸  Instagram Profile", f"@{handles.get('instagram','N/A')}  —  {ig.get('bio_summary','')}")
-    for (lbl,val,col),(x,y) in zip([
-        ("FOLLOWERS",         ig.get("followers","N/A"),      GREEN),
-        ("FOLLOWING",         ig_raw.get("following","N/A"),  TEAL),
-        ("TOTAL POSTS",       ig.get("posts","N/A"),          GOLD),
-        ("ENGAGEMENT RATE",   ig.get("engagement_rate","N/A"),GREEN),
-        ("AVG LIKES/POST",    ig.get("avg_likes","N/A"),      ORANGE),
-        ("AVG COMMENTS/POST", ig.get("avg_comments","N/A"),   PURPLE),
-    ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1),(4.7,4.1),(8.9,4.1)]):
-        stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "📸  Instagram Content Strategy", f"Content mix from recent {ig_raw.get('post_count',12)} posts")
-    img_c = ig_raw.get("img_count",0)
-    car_c = ig_raw.get("car_count",0)
-    vid_c = ig_raw.get("vid_count",0)
-    total = max(img_c+car_c+vid_c, 1)
-    cd = ChartData()
-    cd.categories = ["Images","Carousels","Videos/Reels"]
-    cd.add_series("Posts",(img_c,car_c,vid_c))
-    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5),Inches(1.3),Inches(7.2),Inches(5.0),cd).chart
-    chart.has_legend = False
-    for i,col in enumerate([TEAL,GOLD,PURPLE]):
-        pt = chart.plots[0].series[0].points[i]
-        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    chart.category_axis.tick_labels.font.size = Pt(12)
-    chart.category_axis.tick_labels.font.color.rgb = WHITE
-    chart.value_axis.tick_labels.font.size = Pt(11)
-    chart.value_axis.tick_labels.font.color.rgb = WHITE
-    for i,(lbl,cnt,col) in enumerate([("IMAGES",img_c,TEAL),("CAROUSELS",car_c,GOLD),("VIDEOS/REELS",vid_c,PURPLE)]):
-        stat_card(s, 8.1, 1.3+i*1.9, 4.7, 1.65, lbl, f"{cnt} posts ({int(cnt/total*100)}%)", col)
-    insight_card(s, 0.5, 6.55, 12.3, 0.75, "💡 Instagram Strength", ig.get("strength",""), GREEN)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "👥  Facebook Page", f"{handles.get('facebook','N/A')}  —  {fb.get('category','')}")
-    for (lbl,val,col),(x,y) in zip([
-        ("PAGE FOLLOWERS", fb.get("followers","N/A"),      BLUE),
-        ("FOLLOWING",      fb_raw.get("following","N/A"),  TEAL),
-        ("PAGE RATING",    fb.get("rating","N/A"),         GOLD),
-        ("VERIFIED",       fb.get("is_verified","No"),     GREEN),
-        ("CATEGORY",       str(fb.get("category","N/A"))[:20], PURPLE),
-        ("PLATFORM",       "Facebook",                     BLUE),
-    ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1),(4.7,4.1),(8.9,4.1)]):
-        stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "👥  Facebook Insights", "Page details and strategic analysis")
-    rect(s, 0.5, 1.3, 12.3, 2.2, NAVY2, BLUE)
-    tb(s, "PAGE ABOUT", 0.75, 1.4, 4, 0.35, size=11, bold=True, color=BLUE)
-    tb(s, str(fb.get("about","N/A")), 0.75, 1.8, 11.8, 1.5, size=13, color=WHITE)
-    add_table(s, ["Detail","Value"], [
-        ["Address", str(fb_raw.get("address","N/A") or "N/A")],
-        ["Phone",   str(fb_raw.get("phone","N/A")   or "N/A")],
-        ["Email",   str(fb_raw.get("email","N/A")   or "N/A")],
-        ["Website", str(fb_raw.get("website","N/A") or "N/A")],
-    ], 0.5, 3.7, 6.0, 2.5)
-    insight_card(s, 6.8, 3.7,  5.9, 1.1, "💡 Strength",       fb.get("strength","N/A"), BLUE)
-    insight_card(s, 6.8, 5.05, 5.9, 1.1, "🎯 Recommendation", fb.get("recommendation","N/A"), GOLD)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "▶️   YouTube Channel", f"{handles.get('youtube','N/A')}  —  {yt.get('description_summary','')}")
-    for (lbl,val,col),(x,y) in zip([
-        ("SUBSCRIBERS",  yt.get("subscribers","N/A"), RED),
-        ("TOTAL VIDEOS", yt.get("videos","N/A"),      ORANGE),
-        ("TOTAL VIEWS",  yt.get("views","N/A"),        GOLD),
-        ("VERIFIED",     yt.get("is_verified","No"),   GREEN),
-        ("JOINED DATE",  yt.get("joined","N/A"),       TEAL),
-        ("PLATFORM",     "YouTube",                    RED),
-    ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1),(4.7,4.1),(8.9,4.1)]):
-        stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "▶️   YouTube Channel Insights", "Channel performance and strategic analysis")
-    rect(s, 0.5, 1.3, 12.3, 2.0, NAVY2, RED)
-    tb(s, "CHANNEL DESCRIPTION", 0.75, 1.4, 6, 0.35, size=11, bold=True, color=RED)
-    tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:300], 0.75, 1.8, 11.8, 1.3, size=13, color=WHITE)
-    insight_card(s, 0.5,  3.55, 6.0, 1.4, "💡 Strength",       yt.get("strength","N/A"), RED)
-    insight_card(s, 6.85, 3.55, 5.9, 1.4, "🎯 Recommendation", yt.get("recommendation","N/A"), GOLD)
-    add_table(s, ["Metric","Value"], [
-        ["Subscribers",  yt.get("subscribers","N/A")],
-        ["Total Videos", yt.get("videos","N/A")],
-        ["Total Views",  yt.get("views","N/A")],
-        ["Channel Age",  yt.get("joined","N/A")],
-    ], 0.5, 5.1, 6.0, 2.1)
-    rect(s, 6.85, 5.1, 5.9, 2.1, NAVY2, ORANGE)
-    tb(s, "VIEWS PER VIDEO (EST.)", 7.1, 5.2, 5.4, 0.35, size=11, bold=True, color=ORANGE)
-    try:
-        vpv = int(str(yt.get("views","0")).replace(",","")) // max(int(str(yt.get("videos","1")).replace(",","")),1)
-        tb(s, f"{vpv:,}", 7.1, 5.65, 5.4, 1.0, size=32, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-    except:
-        tb(s, "N/A", 7.1, 5.65, 5.4, 1.0, size=32, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "💼  LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}")
-    for (lbl,val,col),(x,y) in zip([
-        ("FOLLOWERS",   li.get("followers","N/A"), TEAL),
-        ("EMPLOYEES",   li.get("employees","N/A"), BLUE),
-        ("PLATFORM",    "LinkedIn",                TEAL),
-        ("DATA SOURCE", "Google Search",           LIGHT),
-    ], [(0.5,1.3),(4.7,1.3),(8.9,1.3),(0.5,4.1)]):
-        stat_card(s, x, y, 3.8, 1.9, lbl, val, col)
-    rect(s, 0.5, 4.0, 12.3, 2.1, NAVY2, TEAL)
-    tb(s, "COMPANY SUMMARY", 0.75, 4.1, 5, 0.35, size=11, bold=True, color=TEAL)
-    tb(s, li.get("summary","N/A"), 0.75, 4.5, 11.8, 1.4, size=13, color=WHITE)
-    insight_card(s, 0.5,  6.3, 6.0, 0.9, "💡 Strength",       li.get("strength","N/A"), TEAL)
-    insight_card(s, 6.85, 6.3, 5.9, 0.9, "🎯 Recommendation", li.get("recommendation","N/A"), GOLD)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "💼  LinkedIn Strategic Analysis", "Professional presence and B2B opportunities")
-    add_table(s, ["Metric","Value","Insight"], [
-        ["Followers",     li.get("followers","N/A"), "Professional audience size"],
-        ["Employees",     li.get("employees","N/A"), "Company scale indicator"],
-        ["Content Focus", "B2B & Professional",      "Key content strategy"],
-        ["Best Post Type","Articles & Updates",       "Highest LinkedIn engagement"],
-        ["Posting Freq.", "2-3x per week",            "LinkedIn best practice"],
-    ], 0.5, 1.3, 12.3, 4.0)
-    insight_card(s, 0.5,  5.55, 6.0, 1.65, "💡 Strength",       li.get("strength","N/A"), TEAL)
-    insight_card(s, 6.85, 5.55, 5.9, 1.65, "🎯 Recommendation", li.get("recommendation","N/A"), GOLD)
-
-    s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "📊  Cross-Platform Follower Comparison", "Audience size across all platforms")
     def parse_num(val):
         try:
             v = str(val).replace(",","").upper().replace("+","")
@@ -883,82 +738,250 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
             if "K" in v: return float(v.replace("K","")) * 1_000
             return float(v)
         except: return 0
-    ig_f = parse_num(ig.get("followers",0))
-    fb_f = parse_num(fb.get("followers",0))
-    yt_f = parse_num(yt.get("subscribers",0))
-    li_f = parse_num(li.get("followers",0))
+
+    # ── SLIDE 1: COVER (dark) ────────────────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_DARK)
+    brand_mark(s, dark_bg=True)
+    tb(s, "SOCIAL INTELLIGENCE REPORT", 0.55, 1.55, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
+    tb(s, brand, 0.55, 1.95, 11.50, 1.50, size=58, color=TEXT_LIGHT, font=FONT_SERIF)
+    tb(s, niche, 0.55, 2.95, 11.50, 0.45, size=15, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
+    tb(s, website_url.replace("https://","").replace("http://",""), 0.55, 3.42, 11.50, 0.35,
+       size=11.5, color=GOLD, font=FONT_MONO)
+
+    platform_labels = []
+    if handles.get("instagram"): platform_labels.append("Instagram")
+    if handles.get("facebook"):  platform_labels.append("Facebook")
+    if handles.get("youtube"):   platform_labels.append("YouTube")
+    if handles.get("linkedin"):  platform_labels.append("LinkedIn")
+    for i, label in enumerate(platform_labels):
+        pill(s, 0.55 + i*2.12, 4.05, label)
+
+    stat_block(s, 0.55, 5.05, 3.70, ig.get("followers","N/A"), "Instagram Followers", size=54, dark_bg=True)
+    stat_block(s, 4.65, 5.05, 3.70, fb.get("followers","N/A"), "Facebook Followers", size=54, dark_bg=True)
+    stat_block(s, 8.75, 5.05, 3.70, yt.get("subscribers","N/A"), "YouTube Subscribers", size=54, dark_bg=True)
+
+    tb(s, f"Powered by SearchAPI.io + Claude AI  ·  {website_url.replace('https://','').replace('http://','')}",
+       0.55, 6.55, 11.50, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
+    ln = s.shapes.add_shape(1, Inches(0), Inches(7.46), Inches(13.33), Pt(0.75))
+    ln.fill.solid(); ln.fill.fore_color.rgb = RGBColor(0x2A,0x2A,0x2A); ln.line.fill.background()
+
+    # ── SLIDE 2: Overview (light) ─────────────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Report Overview", "Social Media Overview", f"{brand} — all platforms at a glance")
+    branded_table(s, ["Platform","Handle","Followers","Key Metric","Status"], [
+        ["Instagram", f"@{handles.get('instagram','N/A')}", ig.get("followers","N/A"), f"ER: {ig.get('engagement_rate','N/A')}", "Active" if handles.get("instagram") else "Not Found"],
+        ["Facebook",  handles.get("facebook","N/A"),        fb.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",      "Active" if handles.get("facebook") else "Not Found"],
+        ["YouTube",   handles.get("youtube","N/A"),          yt.get("subscribers","N/A"), f"Videos: {yt.get('videos','N/A')}",   "Active" if handles.get("youtube") else "Not Found"],
+        ["LinkedIn",  handles.get("linkedin","N/A"),         li.get("followers","N/A"), f"Employees: {li.get('employees','N/A')}", "Active" if handles.get("linkedin") else "Not Found"],
+    ], 0.55, 1.65, 12.23, 2.35)
+    card(s, 0.55, 4.35, 12.23, 2.15, "Overall Analysis", analysis.get("overall_summary",""))
+    footer_bar(s, 2)
+
+    # ── SLIDE 3: Instagram Profile (light) ────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Instagram", "Instagram Profile", f"@{handles.get('instagram','N/A')}")
+    stat_block(s, 0.55, 1.75, 3.86, ig.get("followers","N/A"), "Followers", size=54)
+    stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("following","N/A"), "Following", size=54)
+    stat_block(s, 8.92, 1.75, 3.86, ig.get("posts","N/A"), "Total Posts", size=54)
+    stat_block(s, 0.55, 3.10, 3.86, ig.get("engagement_rate","N/A"), "Engagement Rate", size=32)
+    stat_block(s, 4.73, 3.10, 3.86, ig.get("avg_likes","N/A"), "Avg Likes / Post", size=32)
+    stat_block(s, 8.92, 3.10, 3.86, ig.get("avg_comments","N/A"), "Avg Comments / Post", size=32)
+    card(s, 0.55, 4.75, 12.23, 1.75, "Bio & Positioning", ig.get("bio_summary",""))
+    footer_bar(s, 3)
+
+    # ── SLIDE 4: Instagram Content Strategy (light) ───────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Instagram", "Content Strategy", f"Content mix from the most recent {ig_raw.get('post_count',12)} posts")
+    img_c = ig_raw.get("img_count",0); car_c = ig_raw.get("car_count",0); vid_c = ig_raw.get("vid_count",0)
+    total = max(img_c+car_c+vid_c, 1)
+    cd = ChartData()
+    cd.categories = ["Images","Carousels","Videos / Reels"]
+    cd.add_series("Posts",(img_c,car_c,vid_c))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.85),Inches(5.40),Inches(4.50),cd).chart
+    chart.has_legend = True
+    for i, col in enumerate([GOLD, CARD_DARK, PIE_TAN]):
+        pt = chart.plots[0].series[0].points[i]
+        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
+    for lbl, cnt, y in [("Videos / Reels",vid_c,2.10),("Carousels",car_c,3.25),("Images",img_c,4.40)]:
+        pct = int(round(cnt/total*100))
+        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} posts", size=32)
+    card(s, 6.85, 5.55, 5.60, 1.00, "Instagram Strength", ig.get("strength",""))
+    footer_bar(s, 4)
+
+    # ── SLIDE 5: Facebook Page (light) ─────────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Facebook", "Facebook Page", handles.get('facebook','N/A'))
+    stat_block(s, 0.55, 1.75, 3.86, fb.get("followers","N/A"), "Page Followers", size=54)
+    stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("following","N/A"), "Following", size=54)
+    stat_block(s, 8.92, 1.75, 3.86, fb.get("rating","N/A"), "Page Rating", size=54)
+    stat_block(s, 0.55, 3.10, 3.86, fb.get("is_verified","No"), "Verified", size=32)
+    stat_block(s, 4.73, 3.10, 3.86, str(fb.get("category","N/A"))[:18], "Category", size=32)
+    stat_block(s, 8.92, 3.10, 3.86, "Facebook", "Platform", size=32)
+    card(s, 0.55, 4.75, 12.23, 1.75, "Profile Gap", fb.get("about","N/A"))
+    footer_bar(s, 5)
+
+    # ── SLIDE 6: Facebook Insights (light) ─────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Facebook", "Facebook Insights", "Page details and strategic analysis")
+    branded_table(s, ["Detail","Value"], [
+        ["Address", str(fb_raw.get("address","N/A") or "N/A")],
+        ["Phone",   str(fb_raw.get("phone","N/A")   or "N/A")],
+        ["Email",   str(fb_raw.get("email","N/A")   or "N/A")],
+        ["Website", str(fb_raw.get("website","N/A") or "N/A")],
+    ], 0.55, 1.75, 5.60, 2.60)
+    card(s, 6.75, 1.75, 5.70, 1.35, "Strength", fb.get("strength","N/A"))
+    card(s, 6.75, 3.25, 5.70, 1.90, "Recommendation", fb.get("recommendation","N/A"))
+    filled = sum(1 for v in [fb_raw.get("address"),fb_raw.get("phone"),fb_raw.get("email"),fb_raw.get("website")] if v)
+    stat_block(s, 0.55, 4.75, 5.60, f"{filled} / 4", "Profile Fields Completed", size=54)
+    footer_bar(s, 6)
+
+    # ── SLIDE 7: YouTube Channel (light) ────────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "YouTube", "YouTube Channel", handles.get('youtube','N/A'))
+    tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:220],
+       0.55, 1.62, 12.23, 0.55, size=12.5, color=TEXT_GRAY, font=FONT_MONO_LT)
+    stat_block(s, 0.55, 2.50, 3.86, yt.get("subscribers","N/A"), "Subscribers", size=54)
+    stat_block(s, 4.73, 2.50, 3.86, yt.get("videos","N/A"), "Total Videos", size=54)
+    stat_block(s, 8.92, 2.50, 3.86, yt.get("views","N/A"), "Total Views", size=54)
+    stat_block(s, 0.55, 3.85, 3.86, yt.get("is_verified","No"), "Verified", size=32)
+    stat_block(s, 4.73, 3.85, 3.86, yt.get("joined","N/A"), "Joined Date", size=32)
+    stat_block(s, 8.92, 3.85, 3.86, "YouTube", "Platform", size=32)
+    card(s, 0.55, 5.35, 12.23, 1.15, "Reach Signal", yt.get("strength",""))
+    footer_bar(s, 7)
+
+    # ── SLIDE 8: YouTube Insights (light) ────────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "YouTube", "Channel Insights", "Channel performance and strategic analysis")
+    branded_table(s, ["Metric","Value"], [
+        ["Subscribers",  yt.get("subscribers","N/A")],
+        ["Total Videos", yt.get("videos","N/A")],
+        ["Total Views",  yt.get("views","N/A")],
+        ["Channel Age",  yt.get("joined","N/A")],
+    ], 0.55, 1.65, 5.60, 2.75)
+    try:
+        vpv = int(str(yt.get("views","0")).replace(",","")) // max(int(str(yt.get("videos","1")).replace(",","")),1)
+        vpv_str = f"{vpv:,}"
+    except:
+        vpv_str = "N/A"
+    stat_block(s, 0.55, 4.75, 5.60, vpv_str, "Views Per Video (Est.)", size=54)
+    card(s, 6.75, 1.65, 5.70, 1.75, "Strength", yt.get("strength","N/A"))
+    card(s, 6.75, 3.60, 5.70, 2.35, "Recommendation", yt.get("recommendation","N/A"))
+    footer_bar(s, 8)
+
+    # ── SLIDE 9: LinkedIn (light) ──────────────────────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "LinkedIn", "LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}")
+    stat_block(s, 0.55, 1.75, 3.86, li.get("followers","N/A"), "Followers", size=54)
+    stat_block(s, 4.73, 1.75, 3.86, li.get("employees","N/A"), "Employees", size=54)
+    stat_block(s, 8.92, 1.75, 3.86, "LinkedIn", "Platform", size=54)
+    card(s, 0.55, 3.25, 12.23, 1.15, "Company Summary", li.get("summary","N/A"))
+    card(s, 0.55, 4.75, 5.95, 1.80, "Strength", li.get("strength","N/A"))
+    card(s, 6.65, 4.75, 5.80, 1.80, "Recommendation", li.get("recommendation","N/A"))
+    footer_bar(s, 9)
+
+    # ── SLIDE 10: LinkedIn Strategic Analysis (light) ─────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "LinkedIn", "Strategic Analysis", "Professional presence and B2B opportunities")
+    branded_table(s, ["Metric","Value","Insight"], [
+        ["Followers",     li.get("followers","N/A"), "Professional audience size"],
+        ["Employees",     li.get("employees","N/A"), "Company scale indicator"],
+        ["Content Focus", "B2B & Professional",      "Key content strategy"],
+        ["Best Post Type","Articles & Updates",      "Highest LinkedIn engagement"],
+        ["Posting Freq.", "2–3x per week",           "LinkedIn best practice"],
+    ], 0.55, 1.65, 12.23, 2.85)
+    card(s, 0.55, 4.85, 5.95, 1.65, "Strength", li.get("strength","N/A"))
+    card(s, 6.65, 4.85, 5.80, 1.65, "Recommendation", li.get("recommendation","N/A"))
+    footer_bar(s, 10)
+
+    # ── SLIDE 11: Cross-Platform Comparison (dark) ────────────
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_DARK)
+    brand_mark(s, dark_bg=True)
+    kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=True)
+    ig_f = parse_num(ig.get("followers",0)); fb_f = parse_num(fb.get("followers",0))
+    yt_f = parse_num(yt.get("subscribers",0)); li_f = parse_num(li.get("followers",0))
     cd2 = ChartData()
     cd2.categories = ["Instagram","Facebook","YouTube","LinkedIn"]
-    cd2.add_series("Followers/Subscribers",(ig_f,fb_f,yt_f,li_f))
-    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5),Inches(1.3),Inches(8.0),Inches(5.5),cd2).chart
+    cd2.add_series("Followers",(ig_f,fb_f,yt_f,li_f))
+    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55),Inches(1.75),Inches(12.23),Inches(3.65),cd2).chart
     chart2.has_legend = False
-    for i,col in enumerate([GREEN,BLUE,RED,TEAL]):
-        pt = chart2.plots[0].series[0].points[i]
-        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    chart2.category_axis.tick_labels.font.size = Pt(12)
-    chart2.category_axis.tick_labels.font.color.rgb = WHITE
-    chart2.value_axis.tick_labels.font.size = Pt(10)
-    chart2.value_axis.tick_labels.font.color.rgb = WHITE
-    for i,(lbl,val,col) in enumerate([
-        ("INSTAGRAM", ig.get("followers","N/A"),   GREEN),
-        ("FACEBOOK",  fb.get("followers","N/A"),   BLUE),
-        ("YOUTUBE",   yt.get("subscribers","N/A"), RED),
-        ("LINKEDIN",  li.get("followers","N/A"),   TEAL),
-    ]):
-        stat_card(s, 8.85, 1.3+i*1.55, 4.0, 1.3, lbl, val, col)
+    pt0 = chart2.plots[0].series[0]
+    for i in range(4):
+        pt0.points[i].format.fill.solid(); pt0.points[i].format.fill.fore_color.rgb = GOLD
+    chart2.category_axis.tick_labels.font.size = Pt(11); chart2.category_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
+    chart2.value_axis.tick_labels.font.size = Pt(10); chart2.value_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
+    for i,(lbl,val) in enumerate([("Instagram",ig.get("followers","N/A")),("Facebook",fb.get("followers","N/A")),
+                                    ("YouTube",yt.get("subscribers","N/A")),("LinkedIn",li.get("followers","N/A"))]):
+        stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=True)
+    footer_bar(s, 11, dark_bg=True)
 
+    # ── SLIDE 12: Engagement Benchmarks (light) ───────────────
     s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "📈  Engagement Benchmarks", "Performance metrics vs industry standards")
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Benchmarks", "Engagement Benchmarks", "Performance metrics vs. industry standards")
     def er_status(val):
         try:
             v = float(str(val).replace("%",""))
-            return "🟢 Strong" if v>=3 else ("🟡 Average" if v>=1 else "🔴 Low")
-        except: return "📊 Data"
-    add_table(s, ["Platform","Key Metric","Value","Benchmark","Status"], [
-        ["📸 Instagram","Engagement Rate",   ig.get("engagement_rate","N/A"),">3% is good",        er_status(ig.get("engagement_rate","0"))],
-        ["📸 Instagram","Avg Likes/Post",    ig.get("avg_likes","N/A"),      "Varies by niche",    "📊 Data"],
-        ["📸 Instagram","Avg Comments/Post", ig.get("avg_comments","N/A"),   ">20 is strong",      "📊 Data"],
-        ["👥 Facebook", "Page Followers",    fb.get("followers","N/A"),      "Varies by industry", "📊 Data"],
-        ["👥 Facebook", "Page Rating",       fb.get("rating","N/A"),         ">4.0 is good",       "📊 Data"],
-        ["▶️ YouTube",  "Subscribers",       yt.get("subscribers","N/A"),    "Varies by niche",    "📊 Data"],
-        ["▶️ YouTube",  "Views per Video",   "See slide 8",                  ">1000 is good",      "📊 Data"],
-        ["💼 LinkedIn", "Followers",         li.get("followers","N/A"),      "Varies by industry", "📊 Data"],
-    ], 0.5, 1.3, 12.3, 5.8)
+            return "Strong" if v>=3 else ("Average" if v>=1 else "Low")
+        except: return "—"
+    branded_table(s, ["Platform","Key Metric","Value","Benchmark","Status"], [
+        ["Instagram","Engagement Rate",   ig.get("engagement_rate","N/A"),">3% is good",        er_status(ig.get("engagement_rate","0"))],
+        ["Instagram","Avg Likes / Post",  ig.get("avg_likes","N/A"),      "Varies by niche",    "—"],
+        ["Instagram","Avg Comments / Post", ig.get("avg_comments","N/A"), ">20 is strong",      "—"],
+        ["Facebook", "Page Followers",    fb.get("followers","N/A"),      "Varies by industry", "—"],
+        ["YouTube",  "Subscribers",       yt.get("subscribers","N/A"),    "Varies by niche",    "—"],
+        ["YouTube",  "Views / Video",     vpv_str if 'vpv_str' in dir() else "N/A", ">1,000 is good", "—"],
+        ["LinkedIn", "Followers",         li.get("followers","N/A"),      "Varies by industry", "—"],
+    ], 0.55, 1.65, 12.23, 4.90)
+    footer_bar(s, 12)
 
+    # ── SLIDE 13: Strengths & Gaps (light) ────────────────────
     s = prs.slides.add_slide(blank)
-    bg(s, prs)
-    slide_title(s, "💪  Key Strengths & Gaps", "What's working and what needs attention")
-    tb(s, "STRONGEST PLATFORM", 0.5, 1.25, 6.2, 0.35, size=11, bold=True, color=GREEN)
-    rect(s, 0.5, 1.6, 6.2, 1.3, NAVY2, GREEN)
-    tb(s, cp.get("strongest_platform","N/A"), 0.7, 1.7, 5.8, 1.1, size=13, color=WHITE)
-    tb(s, "NEEDS MOST WORK", 6.85, 1.25, 5.9, 0.35, size=11, bold=True, color=RED)
-    rect(s, 6.85, 1.6, 5.9, 1.3, NAVY2, RED)
-    tb(s, cp.get("weakest_platform","N/A"), 7.05, 1.7, 5.5, 1.1, size=13, color=WHITE)
-    insight_card(s, 0.5,  3.15, 6.2, 1.4, "🔄 Content Consistency", cp.get("content_consistency","N/A"), TEAL)
-    insight_card(s, 6.85, 3.15, 5.9, 1.4, "🚀 Growth Opportunity",  cp.get("growth_opportunity","N/A"),  GOLD)
-    rect(s, 0.5, 4.75, 12.3, 1.9, NAVY2, PURPLE)
-    tb(s, "OVERALL SUMMARY", 0.75, 4.85, 5, 0.35, size=11, bold=True, color=PURPLE)
-    tb(s, analysis.get("overall_summary","N/A"), 0.75, 5.25, 11.8, 1.25, size=13, color=WHITE)
+    bg(s, prs, BG_LIGHT)
+    brand_mark(s, dark_bg=False)
+    kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps", "What's working, and what needs attention")
+    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform", cp.get("strongest_platform","N/A"))
+    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work", cp.get("weakest_platform","N/A"))
+    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"))
+    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity", cp.get("growth_opportunity","N/A"))
+    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary", analysis.get("overall_summary","N/A"))
+    footer_bar(s, 13)
 
+    # ── SLIDE 14: Recommendations (dark) ──────────────────────
     s = prs.slides.add_slide(blank)
-    bg(s, prs, DARK)
-    tb(s, "STRATEGIC RECOMMENDATIONS", 0.6, 0.25, 12, 0.5, size=13, bold=True, color=GOLD, italic=True)
-    tb(s, "Action Plan", 0.6, 0.7, 12, 0.65, size=32, bold=True, color=WHITE)
-    for (title,body,col,x,y) in [
-        ("📸  Instagram", ig.get("recommendation","N/A"), GREEN, 0.5, 1.55),
-        ("👥  Facebook",  fb.get("recommendation","N/A"), BLUE,  0.5, 3.1),
-        ("▶️   YouTube",   yt.get("recommendation","N/A"), RED,   6.9, 1.55),
-        ("💼  LinkedIn",  li.get("recommendation","N/A"), TEAL,  6.9, 3.1),
-    ]:
-        rect(s, x, y, 6.0, 1.3, NAVY2, col)
-        tb(s, title, x+0.2, y+0.1,  5.6, 0.38, size=13, bold=True, color=col)
-        tb(s, body,  x+0.2, y+0.52, 5.6, 0.68, size=12, color=WHITE)
-    rect(s, 0.5, 4.75, 12.3, 1.5, NAVY2, GOLD)
-    tb(s, "🎯  TOP PRIORITY", 0.75, 4.85, 5, 0.35, size=12, bold=True, color=GOLD)
-    tb(s, cp.get("overall_recommendation","N/A"), 0.75, 5.25, 11.8, 0.85, size=14, color=WHITE)
-    tb(s, f"Report for {brand} ({website_url})  •  SearchAPI.io + Claude AI",
-       0.5, 7.1, 12.3, 0.3, size=10, color=LIGHT, align=PP_ALIGN.CENTER, italic=True)
+    bg(s, prs, BG_DARK)
+    brand_mark(s, dark_bg=True)
+    tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
+    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65, size=26, color=TEXT_LIGHT, font=FONT_SERIF)
+    tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35, size=13, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
+    card(s, 0.55, 1.70, 5.96, 1.30, "Instagram", ig.get("recommendation","N/A"), dark_bg=True)
+    card(s, 6.83, 1.70, 5.96, 1.30, "YouTube", yt.get("recommendation","N/A"), dark_bg=True)
+    card(s, 0.55, 3.30, 5.96, 1.30, "Facebook", fb.get("recommendation","N/A"), dark_bg=True)
+    card(s, 6.83, 3.30, 5.96, 1.30, "LinkedIn", li.get("recommendation","N/A"), dark_bg=True)
+    card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=True)
+    tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Claude AI",
+       0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
+    footer_bar(s, 14, dark_bg=True)
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
@@ -988,7 +1011,11 @@ def generate():
         ig_raw   = fetch_instagram(handles.get("instagram","")) if handles.get("instagram") else {}
         fb_raw   = fetch_facebook(handles.get("facebook",""))   if handles.get("facebook")  else {}
         yt_raw   = fetch_youtube(handles.get("youtube",""))     if handles.get("youtube")   else {}
-        li_raw   = fetch_linkedin(handles.get("linkedin",""))   if handles.get("linkedin")  else {}
+
+        domain_for_brand = website_url.replace("https://","").replace("http://","").rstrip("/")
+        brand_for_search  = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain_for_brand).replace("www.","")
+        li_raw   = fetch_linkedin(handles.get("linkedin",""), brand_for_search) if handles.get("linkedin")  else {}
+
         analysis = analyse_with_claude(website_url, handles, ig_raw, fb_raw, yt_raw, li_raw)
         ppt_path, safe_name = create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url)
         return jsonify({
