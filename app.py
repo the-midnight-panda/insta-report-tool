@@ -53,7 +53,6 @@ def clean_domain(url):
     return url
 
 def is_youtube_channel_id(handle):
-    """Channel IDs look like UCiw5nQveZSa9HIhgQfhTOgw — start with UC, ~24 chars."""
     raw = handle.lstrip("@")
     return raw.startswith("UC") and len(raw) >= 20
 
@@ -629,16 +628,26 @@ def tb(slide, text, x, y, w, h, size=14, bold=False, color=TEXT_DARK,
         p.line_spacing = line_spacing
     return box
 
-def brand_mark(slide, dark_bg=False):
-    """Two-dot logo mark + MIDNIGHT PANDA wordmark, top-left."""
+def brand_mark(slide, dark_bg=False, top_right=False):
+    """
+    Two-dot logo mark + MIDNIGHT PANDA wordmark.
+    top_right=True moves it to the top-right corner so it never
+    collides with the kicker/title block on the top-left.
+    """
     outer = TEXT_LIGHT if dark_bg else TEXT_DARK
     inner = TEXT_DARK if dark_bg else TEXT_LIGHT
-    for ox in [0.55, 0.79]:
+    if top_right:
+        dot_xs = [10.05, 10.29]
+        text_x = 10.58
+    else:
+        dot_xs = [0.55, 0.79]
+        text_x = 1.08
+    for ox in dot_xs:
         c1 = slide.shapes.add_shape(9, Inches(ox), Inches(0.45), Inches(0.16), Inches(0.16))
         c1.fill.solid(); c1.fill.fore_color.rgb = outer; c1.line.fill.background()
         c2 = slide.shapes.add_shape(9, Inches(ox+0.05), Inches(0.50), Inches(0.05), Inches(0.05))
         c2.fill.solid(); c2.fill.fore_color.rgb = inner; c2.line.fill.background()
-    tb(slide, "MIDNIGHT PANDA", 1.08, 0.42, 2.20, 0.32, size=9.5, color=outer, font=FONT_MONO)
+    tb(slide, "MIDNIGHT PANDA", text_x, 0.42, 2.20, 0.32, size=9.5, color=outer, font=FONT_MONO)
 
 def footer_bar(slide, page_num, dark_bg=False):
     line_color = RGBColor(0x2A,0x2A,0x2A) if dark_bg else RGBColor(0xD8,0xD5,0xCC)
@@ -652,7 +661,7 @@ def footer_bar(slide, page_num, dark_bg=False):
 def kicker_header(slide, kicker, title, subtitle, dark_bg=False):
     title_color = TEXT_LIGHT if dark_bg else TEXT_DARK
     sub_color   = TEXT_GRAY_LT if dark_bg else TEXT_GRAY
-    tb(slide, kicker.upper(), 0.55, 0.42, 8.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
+    tb(slide, kicker.upper(), 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
     tb(slide, title, 0.55, 0.72, 11.50, 0.65, size=26, color=title_color, font=FONT_SERIF)
     if subtitle:
         tb(slide, subtitle, 0.55, 1.34, 11.50, 0.35, size=13, color=sub_color, font=FONT_MONO_LT)
@@ -739,7 +748,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
             return float(v)
         except: return 0
 
-    # ── SLIDE 1: COVER (dark) ────────────────────────────────
+    # ── SLIDE 1: COVER (dark) — logo stays top-left, nothing to collide with ──
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_DARK)
     brand_mark(s, dark_bg=True)
@@ -757,9 +766,11 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     for i, label in enumerate(platform_labels):
         pill(s, 0.55 + i*2.12, 4.05, label)
 
-    stat_block(s, 0.55, 5.05, 3.70, ig.get("followers","N/A"), "Instagram Followers", size=54, dark_bg=True)
-    stat_block(s, 4.65, 5.05, 3.70, fb.get("followers","N/A"), "Facebook Followers", size=54, dark_bg=True)
-    stat_block(s, 8.75, 5.05, 3.70, yt.get("subscribers","N/A"), "YouTube Subscribers", size=54, dark_bg=True)
+    # ── 4 equal-width stat blocks — Instagram / Facebook / YouTube / LinkedIn ──
+    stat_block(s, 0.55, 5.05, 2.83, ig.get("followers","N/A"), "Instagram Followers", size=44, dark_bg=True)
+    stat_block(s, 3.68, 5.05, 2.83, fb.get("followers","N/A"), "Facebook Followers", size=44, dark_bg=True)
+    stat_block(s, 6.81, 5.05, 2.83, yt.get("subscribers","N/A"), "YouTube Subscribers", size=44, dark_bg=True)
+    stat_block(s, 9.94, 5.05, 2.83, li.get("followers","N/A"), "LinkedIn Followers", size=44, dark_bg=True)
 
     tb(s, f"Powered by SearchAPI.io + Claude AI  ·  {website_url.replace('https://','').replace('http://','')}",
        0.55, 6.55, 11.50, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
@@ -769,7 +780,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 2: Overview (light) ─────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Report Overview", "Social Media Overview", f"{brand} — all platforms at a glance")
     branded_table(s, ["Platform","Handle","Followers","Key Metric","Status"], [
         ["Instagram", f"@{handles.get('instagram','N/A')}", ig.get("followers","N/A"), f"ER: {ig.get('engagement_rate','N/A')}", "Active" if handles.get("instagram") else "Not Found"],
@@ -783,7 +794,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 3: Instagram Profile (light) ────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Instagram", "Instagram Profile", f"@{handles.get('instagram','N/A')}")
     stat_block(s, 0.55, 1.75, 3.86, ig.get("followers","N/A"), "Followers", size=54)
     stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("following","N/A"), "Following", size=54)
@@ -797,7 +808,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 4: Instagram Content Strategy (light) ───────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Instagram", "Content Strategy", f"Content mix from the most recent {ig_raw.get('post_count',12)} posts")
     img_c = ig_raw.get("img_count",0); car_c = ig_raw.get("car_count",0); vid_c = ig_raw.get("vid_count",0)
     total = max(img_c+car_c+vid_c, 1)
@@ -818,7 +829,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 5: Facebook Page (light) ─────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Facebook", "Facebook Page", handles.get('facebook','N/A'))
     stat_block(s, 0.55, 1.75, 3.86, fb.get("followers","N/A"), "Page Followers", size=54)
     stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("following","N/A"), "Following", size=54)
@@ -832,7 +843,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 6: Facebook Insights (light) ─────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Facebook", "Facebook Insights", "Page details and strategic analysis")
     branded_table(s, ["Detail","Value"], [
         ["Address", str(fb_raw.get("address","N/A") or "N/A")],
@@ -849,7 +860,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 7: YouTube Channel (light) ────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "YouTube", "YouTube Channel", handles.get('youtube','N/A'))
     tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:220],
        0.55, 1.62, 12.23, 0.55, size=12.5, color=TEXT_GRAY, font=FONT_MONO_LT)
@@ -865,7 +876,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 8: YouTube Insights (light) ────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "YouTube", "Channel Insights", "Channel performance and strategic analysis")
     branded_table(s, ["Metric","Value"], [
         ["Subscribers",  yt.get("subscribers","N/A")],
@@ -886,7 +897,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 9: LinkedIn (light) ──────────────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "LinkedIn", "LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}")
     stat_block(s, 0.55, 1.75, 3.86, li.get("followers","N/A"), "Followers", size=54)
     stat_block(s, 4.73, 1.75, 3.86, li.get("employees","N/A"), "Employees", size=54)
@@ -899,7 +910,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 10: LinkedIn Strategic Analysis (light) ─────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "LinkedIn", "Strategic Analysis", "Professional presence and B2B opportunities")
     branded_table(s, ["Metric","Value","Insight"], [
         ["Followers",     li.get("followers","N/A"), "Professional audience size"],
@@ -915,7 +926,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 11: Cross-Platform Comparison (dark) ────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_DARK)
-    brand_mark(s, dark_bg=True)
+    brand_mark(s, dark_bg=True, top_right=True)
     kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=True)
     ig_f = parse_num(ig.get("followers",0)); fb_f = parse_num(fb.get("followers",0))
     yt_f = parse_num(yt.get("subscribers",0)); li_f = parse_num(li.get("followers",0))
@@ -937,7 +948,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 12: Engagement Benchmarks (light) ───────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Benchmarks", "Engagement Benchmarks", "Performance metrics vs. industry standards")
     def er_status(val):
         try:
@@ -950,7 +961,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["Instagram","Avg Comments / Post", ig.get("avg_comments","N/A"), ">20 is strong",      "—"],
         ["Facebook", "Page Followers",    fb.get("followers","N/A"),      "Varies by industry", "—"],
         ["YouTube",  "Subscribers",       yt.get("subscribers","N/A"),    "Varies by niche",    "—"],
-        ["YouTube",  "Views / Video",     vpv_str if 'vpv_str' in dir() else "N/A", ">1,000 is good", "—"],
+        ["YouTube",  "Views / Video",     vpv_str, ">1,000 is good", "—"],
         ["LinkedIn", "Followers",         li.get("followers","N/A"),      "Varies by industry", "—"],
     ], 0.55, 1.65, 12.23, 4.90)
     footer_bar(s, 12)
@@ -958,7 +969,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 13: Strengths & Gaps (light) ────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False)
+    brand_mark(s, dark_bg=False, top_right=True)
     kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps", "What's working, and what needs attention")
     card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform", cp.get("strongest_platform","N/A"))
     card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work", cp.get("weakest_platform","N/A"))
@@ -970,7 +981,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     # ── SLIDE 14: Recommendations (dark) ──────────────────────
     s = prs.slides.add_slide(blank)
     bg(s, prs, BG_DARK)
-    brand_mark(s, dark_bg=True)
+    brand_mark(s, dark_bg=True, top_right=True)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
     tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65, size=26, color=TEXT_LIGHT, font=FONT_SERIF)
     tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35, size=13, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
