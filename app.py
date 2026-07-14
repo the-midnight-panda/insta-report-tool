@@ -320,23 +320,16 @@ def _to_timestamp(val):
         pass
     return None
 
-def _post_permalink(post, username):
-    link = _get_first(post, ["url","permalink","link","post_url"])
-    if link and link.startswith("http"):
-        return link
-    shortcode = _get_first(post, ["shortCode","shortcode","code","id"])
-    if shortcode:
-        return f"https://www.instagram.com/p/{shortcode}/"
-    return "N/A"
-
 def _classify_post(post):
     t = str(_get_first(post, ["type","productType","product_type"], "")).lower()
     if "video" in t or "reel" in t or "clip" in t:
         return "reels"
     elif "carousel" in t or "sidecar" in t or "album" in t:
         return "carousels"
-    else:
-        return "images"
+    # If from reel scraper, always classify as reel
+    if post.get("_source") == "reel_scraper":
+        return "reels"
+    return "images"
 
 def _score(p):
     return p["likes"] + p["comments"] + (p["shares"] or 0) + (p["reposts"] or 0)
@@ -385,50 +378,43 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
         else:
             result["max_views"]     = "N/A"
             result["max_views_url"] = "N/A"
-        result["like_rate"]    = f"{(total_likes/n/followers*100):.2f}%"    if followers else "N/A"
-        result["comment_rate"] = f"{(total_comments/n/followers*100):.2f}%" if followers else "N/A"
-        result["share_rate"]   = f"{(total_shares/n/followers*100):.2f}%"   if (followers and shares_known) else "N/A"
-        result["repost_rate"]  = f"{(total_reposts/n/followers*100):.2f}%"  if (followers and reposts_known) else "N/A"
+
+        # ── Rates are per VIEW (not per follower) ──────────────────
+        result["like_rate"]    = f"{(total_likes/total_views*100):.2f}%"    if total_views else "N/A"
+        result["comment_rate"] = f"{(total_comments/total_views*100):.2f}%" if total_views else "N/A"
+        result["share_rate"]   = f"{(total_shares/total_views*100):.2f}%"   if (total_views and shares_known) else "N/A"
+        result["repost_rate"]  = f"{(total_reposts/total_views*100):.2f}%"  if (total_views and reposts_known) else "N/A"
         result["er_by_view"]   = f"{((total_likes+total_comments+total_shares+total_reposts)/total_views*100):.2f}%" if total_views else "N/A"
 
     return result
 
 
-def fetch_apify_async(username):
-    """
-    Async Apify: start run, poll until done, fetch dataset.
-    Used when sync endpoint returns 201 with no data.
-    """
+def fetch_apify_async(username, actor_id, input_json):
+    """Generic async Apify runner: start run, poll until done, fetch dataset."""
     try:
-        print(f"   🔄 Apify async: starting run for @{username}...")
+        print(f"   🔄 Apify async: starting {actor_id} for @{username}...")
         start_r = requests.post(
-            "https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs",
+            f"https://api.apify.com/v2/acts/{actor_id}/runs",
             params={"token": APIFY_API_KEY},
-            json={
-                "username":      [username],
-                "resultsLimit":  30,
-                "addParentData": False,
-            },
+            json=input_json,
             timeout=30
         )
         if start_r.status_code not in (200, 201):
             print(f"   ⚠️ Apify async start failed: {start_r.status_code}")
             return []
 
-        run_data = start_r.json().get("data", {})
-        run_id   = run_data.get("id")
+        run_id = start_r.json().get("data", {}).get("id")
         if not run_id:
             print("   ⚠️ Apify async: no run ID returned")
             return []
 
         print(f"   ⏳ Apify run started: {run_id} — polling...")
 
-        # Poll until SUCCEEDED (max 2 minutes, check every 5s)
         last_status_r = None
         for attempt in range(24):
             time.sleep(5)
             last_status_r = requests.get(
-                f"https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs/{run_id}",
+                f"https://api.apify.com/v2/acts/{actor_id}/runs/{run_id}",
                 params={"token": APIFY_API_KEY},
                 timeout=15
             )
@@ -455,7 +441,7 @@ def fetch_apify_async(username):
         )
         posts = items_r.json()
         if isinstance(posts, list) and len(posts) > 0:
-            print(f"   ✅ Apify async returned {len(posts)} posts")
+            print(f"   ✅ Apify async returned {len(posts)} items")
             return posts
         else:
             print("   ⚠️ Apify async dataset was empty")
@@ -468,38 +454,91 @@ def fetch_apify_async(username):
 
 def fetch_instagram_posts_via_apify(username):
     """
-    Fetch last 30 posts via Apify Instagram Post Scraper.
-    Tries sync first, falls back to async polling if needed.
+    Two-scraper approach:
+    1. apify/instagram-post-scraper  → images + carousels (likes, comments, views)
+    2. apify/instagram-reel-scraper  → reels (likes, comments, views, SHARES)
+    Merged and capped at 30 posts total.
     """
     if not APIFY_API_KEY:
         print("   ⚠️ No APIFY_API_KEY set")
         return []
+
+    all_posts = []
+
+    # ── 1. Post scraper (images + carousels + some reels) ────────
     try:
-        print(f"   🔄 Apify sync: fetching 30 posts for @{username} (60–90s)...")
+        print(f"   🔄 Apify posts: fetching for @{username}...")
+        post_input = {
+            "username":      [username],
+            "resultsLimit":  30,
+            "addParentData": False,
+        }
         r = requests.post(
             "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items",
             params={"token": APIFY_API_KEY, "timeout": 120},
-            json={
-                "username":      [username],
-                "resultsLimit":  30,
-                "addParentData": False,
-            },
+            json=post_input,
             timeout=150
         )
         if r.status_code in (200, 201):
             posts = r.json()
             if isinstance(posts, list) and len(posts) > 0:
-                print(f"   ✅ Apify sync returned {len(posts)} posts")
-                return posts
+                print(f"   ✅ Post scraper returned {len(posts)} posts")
+                all_posts.extend(posts)
             else:
-                print(f"   ⚠️ Apify sync status {r.status_code} — no posts yet, trying async...")
-                return fetch_apify_async(username)
+                print("   ⚠️ Post scraper sync empty, trying async...")
+                posts = fetch_apify_async(username, "apify~instagram-post-scraper", post_input)
+                all_posts.extend(posts)
         else:
-            print(f"   ⚠️ Apify sync status {r.status_code}, trying async...")
-            return fetch_apify_async(username)
+            print(f"   ⚠️ Post scraper status {r.status_code}, trying async...")
+            posts = fetch_apify_async(username, "apify~instagram-post-scraper", post_input)
+            all_posts.extend(posts)
     except Exception as e:
-        print(f"   ⚠️ Apify sync error: {e}, trying async...")
-        return fetch_apify_async(username)
+        print(f"   ⚠️ Post scraper error: {e}")
+
+    # ── 2. Reel scraper (reels with shares) ──────────────────────
+    try:
+        print(f"   🔄 Apify reels: fetching reels with shares for @{username}...")
+        reel_input = {
+            "username":     [username],
+            "resultsLimit": 30,
+        }
+        r2 = requests.post(
+            "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 120},
+            json=reel_input,
+            timeout=150
+        )
+        if r2.status_code in (200, 201):
+            reels = r2.json()
+            if isinstance(reels, list) and len(reels) > 0:
+                print(f"   ✅ Reel scraper returned {len(reels)} reels")
+                for reel in reels:
+                    reel["_source"] = "reel_scraper"
+                existing_urls = {p.get("url","") for p in all_posts}
+                new_reels = [r for r in reels if r.get("url","") not in existing_urls]
+                all_posts.extend(new_reels)
+                print(f"   ✅ Added {len(new_reels)} new reels (deduped)")
+            else:
+                print("   ⚠️ Reel scraper sync empty, trying async...")
+                reels = fetch_apify_async(username, "apify~instagram-reel-scraper", reel_input)
+                for reel in reels:
+                    reel["_source"] = "reel_scraper"
+                existing_urls = {p.get("url","") for p in all_posts}
+                new_reels = [r for r in reels if r.get("url","") not in existing_urls]
+                all_posts.extend(new_reels)
+        else:
+            print(f"   ⚠️ Reel scraper status {r2.status_code}, trying async...")
+            reels = fetch_apify_async(username, "apify~instagram-reel-scraper", reel_input)
+            for reel in reels:
+                reel["_source"] = "reel_scraper"
+            existing_urls = {p.get("url","") for p in all_posts}
+            new_reels = [r for r in reels if r.get("url","") not in existing_urls]
+            all_posts.extend(new_reels)
+    except Exception as e:
+        print(f"   ⚠️ Reel scraper error: {e}")
+
+    print(f"   ✅ Total combined posts: {len(all_posts)}")
+    return all_posts[:30]
 
 
 def fetch_instagram(username):
@@ -531,7 +570,7 @@ def fetch_instagram(username):
         except:
             followers_n = 0
 
-        # ── 30 posts via Apify, fallback to SearchAPI 12 ─────────────
+        # ── 30 posts via Apify (post + reel scrapers), fallback to SearchAPI ──
         apify_posts = fetch_instagram_posts_via_apify(username)
         if apify_posts:
             posts_raw = apify_posts
@@ -541,7 +580,7 @@ def fetch_instagram(username):
             source    = "searchapi"
             print(f"   ↩️  Using SearchAPI posts ({len(posts_raw)} posts)")
 
-        print(f"   🔍 Source: {source} | First post keys: {list(posts_raw[0].keys())[:12] if posts_raw else 'none'}")
+        print(f"   🔍 Source: {source} | Posts: {len(posts_raw)}")
 
         # ── Parse every post ──────────────────────────────────────────
         parsed = []
@@ -549,15 +588,22 @@ def fetch_instagram(username):
 
         for post in posts_raw:
             if source == "apify":
+                reel_src = post.get("_source") == "reel_scraper"
                 likes    = post.get("likesCount", 0) or 0
                 comments = post.get("commentsCount", 0) or 0
-                shares   = _get_first(post, ["sharesCount","share_count","shares"])
-                reposts  = _get_first(post, ["repostsCount","repost_count","reposts"])
-                views    = _get_first(post, ["videoViewCount","viewsCount","videoPlayCount","views"])
-                url      = _get_first(post, ["url","permalink","link"]) or "N/A"
-                ts       = _to_timestamp(_get_first(post, ["timestamp","iso_date"]))
+                if reel_src:
+                    # Reel scraper has reliable sharesCount
+                    shares  = _get_first(post, ["sharesCount","videoSharesCount","shares"])
+                    reposts = _get_first(post, ["repostsCount","reposts"])
+                    views   = _get_first(post, ["videoViewCount","videoPlayCount","playsCount","views"])
+                else:
+                    shares  = _get_first(post, ["sharesCount","share_count","shares"])
+                    reposts = _get_first(post, ["repostsCount","repost_count","reposts"])
+                    views   = _get_first(post, ["videoViewCount","viewsCount","videoPlayCount","views"])
+                url = _get_first(post, ["url","permalink","link"]) or "N/A"
+                ts  = _to_timestamp(_get_first(post, ["timestamp","iso_date"]))
             else:
-                # SearchAPI confirmed field names from debug route
+                # SearchAPI confirmed field names
                 likes    = post.get("likes", 0) or 0
                 comments = post.get("comments", 0) or 0
                 shares   = _get_first(post, ["share_count","shares","reshare_count"])
@@ -1170,10 +1216,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 4.73, 2.95, 3.86, ig_reels.get("avg_comments","N/A"), "Avg Comments / Reel", size=28, dark_bg=dark)
     stat_block(s, 8.92, 2.95, 3.86, ig_reels.get("avg_shares","N/A"), "Avg Shares / Reel", size=28, dark_bg=dark)
     stat_block(s, 0.55, 4.05, 3.86, ig_reels.get("avg_reposts","N/A"), "Avg Reposts / Reel", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 4.05, 3.86, ig_reels.get("like_rate","N/A"), "Like Rate", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 4.05, 3.86, ig_reels.get("comment_rate","N/A"), "Comment Rate", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 5.15, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 5.15, 3.86, ig_reels.get("repost_rate","N/A"), "Repost Rate", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 4.05, 3.86, ig_reels.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 4.05, 3.86, ig_reels.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 5.15, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 5.15, 3.86, ig_reels.get("repost_rate","N/A"), "Repost Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 8.92, 5.15, 3.86, ig_reels.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
     top_line   = f"Top reel (score {ig_reels.get('top_score','N/A')}): {shorten_url(ig_reels.get('top_url','N/A'),36)}"
     worst_line = f"Worst reel (score {ig_reels.get('worst_score','N/A')}): {shorten_url(ig_reels.get('worst_url','N/A'),36)}"
