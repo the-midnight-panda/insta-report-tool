@@ -1257,6 +1257,33 @@ def download(safe_name):
     return send_file(path, as_attachment=True,
                      download_name=f"{safe_name}_social_report.pptx")
 
+@app.route("/debug_instagram/<username>")
+def debug_instagram(username):
+    """
+    TEMPORARY diagnostic route.
+    Visit this directly in Chrome to see the raw SearchAPI.io response
+    for one Instagram account — no Railway logs, no terminal needed.
+    Example: /debug_instagram/sportico_resorts
+    """
+    try:
+        r = requests.get(
+            "https://www.searchapi.io/api/v1/search",
+            params={"engine": "instagram_profile", "username": username,
+                    "api_key": SEARCHAPI_KEY}
+        )
+        data = r.json()
+        posts = data.get("posts", [])
+        return jsonify({
+            "status_code": r.status_code,
+            "total_posts_returned": len(posts),
+            "search_metadata": data.get("search_metadata", {}),
+            "profile_keys": list(data.get("profile", {}).keys()),
+            "first_post_full": posts[0] if posts else "no posts found",
+            "second_post_full": posts[1] if len(posts) > 1 else "n/a",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=False)
