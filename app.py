@@ -629,11 +629,6 @@ def tb(slide, text, x, y, w, h, size=14, bold=False, color=TEXT_DARK,
     return box
 
 def brand_mark(slide, dark_bg=False, top_right=False):
-    """
-    Two-dot logo mark + MIDNIGHT PANDA wordmark.
-    top_right=True moves it to the top-right corner so it never
-    collides with the kicker/title block on the top-left.
-    """
     outer = TEXT_LIGHT if dark_bg else TEXT_DARK
     inner = TEXT_DARK if dark_bg else TEXT_LIGHT
     if top_right:
@@ -667,10 +662,20 @@ def kicker_header(slide, kicker, title, subtitle, dark_bg=False):
         tb(slide, subtitle, 0.55, 1.34, 11.50, 0.35, size=13, color=sub_color, font=FONT_MONO_LT)
 
 def stat_block(slide, x, y, w, value, label, size=54, dark_bg=False):
+    """
+    FIXED: value box height now matches Bebas Neue's actual line-height
+    at each size, and a small gap is added before the label — this is
+    what was causing the number/label overlap.
+    """
     label_color = TEXT_GRAY_LT if dark_bg else TEXT_GRAY
-    vh = 0.85 if size >= 54 else 0.55
+    if size >= 50:
+        vh = 0.95
+    elif size >= 40:
+        vh = 0.75
+    else:
+        vh = 0.55
     tb(slide, value, x, y, w, vh, size=size, color=GOLD, font=FONT_STAT)
-    tb(slide, label.upper(), x, y+vh, w, 0.30, size=9.5, color=label_color, font=FONT_MONO)
+    tb(slide, label.upper(), x, y+vh+0.05, w, 0.30, size=9.5, color=label_color, font=FONT_MONO)
 
 def pill(slide, x, y, text):
     w, h = 1.90, 0.50
@@ -691,7 +696,8 @@ def card(slide, x, y, w, h, label, body, dark_bg=False):
     tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=12.5, color=body_color,
        font=FONT_MONO_LT, line_spacing=1.15)
 
-def branded_table(slide, headers, rows, x, y, w, h):
+def branded_table(slide, headers, rows, x, y, w, h, dark_bg=False):
+    """Dark-mode aware: on dark slides, header uses GOLD and body uses CARD_DARK."""
     cols = len(headers)
     tbl  = slide.shapes.add_table(len(rows)+1, cols, Inches(x), Inches(y), Inches(w), Inches(h)).table
     try:
@@ -700,30 +706,49 @@ def branded_table(slide, headers, rows, x, y, w, h):
     except: pass
     cw = Inches(w/cols)
     for i in range(cols): tbl.columns[i].width = cw
+
+    header_fill = GOLD if dark_bg else BG_DARK
+    header_text = BG_DARK if dark_bg else TEXT_LIGHT
+    body_fill   = CARD_DARK if dark_bg else BG_LIGHT
+    body_text   = TEXT_LIGHT if dark_bg else TEXT_DARK
+
     for ci, hdr in enumerate(headers):
         cell = tbl.cell(0, ci)
         cell.text = hdr
-        cell.fill.solid(); cell.fill.fore_color.rgb = BG_DARK
+        cell.fill.solid(); cell.fill.fore_color.rgb = header_fill
         p = cell.text_frame.paragraphs[0]
         p.font.bold = True; p.font.size = Pt(13); p.font.name = FONT_MONO_MED
-        p.font.color.rgb = TEXT_LIGHT
+        p.font.color.rgb = header_text
         p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
         cell.margin_left = Inches(0.12)
     for ri, row in enumerate(rows):
         for ci, val in enumerate(row):
             cell = tbl.cell(ri+1, ci)
             cell.text = str(val)
-            cell.fill.solid(); cell.fill.fore_color.rgb = BG_LIGHT
+            cell.fill.solid(); cell.fill.fore_color.rgb = body_fill
             p = cell.text_frame.paragraphs[0]
             p.font.size = Pt(13); p.font.name = FONT_MONO
-            p.font.color.rgb = TEXT_DARK
+            p.font.color.rgb = body_text
             p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
             cell.margin_left = Inches(0.12)
     return tbl
 
+def start_slide(prs, blank, slide_num):
+    """
+    Creates a slide with strict alternating background:
+    odd slide numbers (1,3,5,7,9,11,13) = black
+    even slide numbers (2,4,6,8,10,12,14) = white
+    Returns (slide, is_dark).
+    """
+    is_dark = (slide_num % 2 == 1)
+    s = prs.slides.add_slide(blank)
+    bg(s, prs, BG_DARK if is_dark else BG_LIGHT)
+    brand_mark(s, dark_bg=is_dark, top_right=(slide_num != 1))
+    return s, is_dark
+
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — BUILD 14-SLIDE MIDNIGHT PANDA BRANDED PPT
+# STEP 5 — BUILD 14-SLIDE MIDNIGHT PANDA BRANDED PPT (ALTERNATING)
 # ═══════════════════════════════════════════════════════════════
 
 def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
@@ -748,10 +773,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
             return float(v)
         except: return 0
 
-    # ── SLIDE 1: COVER (dark) — logo stays top-left, nothing to collide with ──
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_DARK)
-    brand_mark(s, dark_bg=True)
+    # ── SLIDE 1: COVER (dark) ─────────────────────────────────
+    s, dark = start_slide(prs, blank, 1)
     tb(s, "SOCIAL INTELLIGENCE REPORT", 0.55, 1.55, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
     tb(s, brand, 0.55, 1.95, 11.50, 1.50, size=58, color=TEXT_LIGHT, font=FONT_SERIF)
     tb(s, niche, 0.55, 2.95, 11.50, 0.45, size=15, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
@@ -766,50 +789,43 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     for i, label in enumerate(platform_labels):
         pill(s, 0.55 + i*2.12, 4.05, label)
 
-    # ── 4 equal-width stat blocks — Instagram / Facebook / YouTube / LinkedIn ──
     stat_block(s, 0.55, 5.05, 2.83, ig.get("followers","N/A"), "Instagram Followers", size=44, dark_bg=True)
     stat_block(s, 3.68, 5.05, 2.83, fb.get("followers","N/A"), "Facebook Followers", size=44, dark_bg=True)
     stat_block(s, 6.81, 5.05, 2.83, yt.get("subscribers","N/A"), "YouTube Subscribers", size=44, dark_bg=True)
     stat_block(s, 9.94, 5.05, 2.83, li.get("followers","N/A"), "LinkedIn Followers", size=44, dark_bg=True)
 
     tb(s, f"Powered by SearchAPI.io + Claude AI  ·  {website_url.replace('https://','').replace('http://','')}",
-       0.55, 6.55, 11.50, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
+       0.55, 6.85, 11.50, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
     ln = s.shapes.add_shape(1, Inches(0), Inches(7.46), Inches(13.33), Pt(0.75))
     ln.fill.solid(); ln.fill.fore_color.rgb = RGBColor(0x2A,0x2A,0x2A); ln.line.fill.background()
 
     # ── SLIDE 2: Overview (light) ─────────────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Report Overview", "Social Media Overview", f"{brand} — all platforms at a glance")
+    s, dark = start_slide(prs, blank, 2)
+    kicker_header(s, "Report Overview", "Social Media Overview", f"{brand} — all platforms at a glance", dark_bg=dark)
     branded_table(s, ["Platform","Handle","Followers","Key Metric","Status"], [
         ["Instagram", f"@{handles.get('instagram','N/A')}", ig.get("followers","N/A"), f"ER: {ig.get('engagement_rate','N/A')}", "Active" if handles.get("instagram") else "Not Found"],
         ["Facebook",  handles.get("facebook","N/A"),        fb.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",      "Active" if handles.get("facebook") else "Not Found"],
         ["YouTube",   handles.get("youtube","N/A"),          yt.get("subscribers","N/A"), f"Videos: {yt.get('videos','N/A')}",   "Active" if handles.get("youtube") else "Not Found"],
         ["LinkedIn",  handles.get("linkedin","N/A"),         li.get("followers","N/A"), f"Employees: {li.get('employees','N/A')}", "Active" if handles.get("linkedin") else "Not Found"],
-    ], 0.55, 1.65, 12.23, 2.35)
-    card(s, 0.55, 4.35, 12.23, 2.15, "Overall Analysis", analysis.get("overall_summary",""))
-    footer_bar(s, 2)
+    ], 0.55, 1.65, 12.23, 2.35, dark_bg=dark)
+    card(s, 0.55, 4.35, 12.23, 2.15, "Overall Analysis", analysis.get("overall_summary",""), dark_bg=dark)
+    footer_bar(s, 2, dark_bg=dark)
 
-    # ── SLIDE 3: Instagram Profile (light) ────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Instagram", "Instagram Profile", f"@{handles.get('instagram','N/A')}")
-    stat_block(s, 0.55, 1.75, 3.86, ig.get("followers","N/A"), "Followers", size=54)
-    stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("following","N/A"), "Following", size=54)
-    stat_block(s, 8.92, 1.75, 3.86, ig.get("posts","N/A"), "Total Posts", size=54)
-    stat_block(s, 0.55, 3.10, 3.86, ig.get("engagement_rate","N/A"), "Engagement Rate", size=32)
-    stat_block(s, 4.73, 3.10, 3.86, ig.get("avg_likes","N/A"), "Avg Likes / Post", size=32)
-    stat_block(s, 8.92, 3.10, 3.86, ig.get("avg_comments","N/A"), "Avg Comments / Post", size=32)
-    card(s, 0.55, 4.75, 12.23, 1.75, "Bio & Positioning", ig.get("bio_summary",""))
-    footer_bar(s, 3)
+    # ── SLIDE 3: Instagram Profile (dark) ─────────────────────
+    s, dark = start_slide(prs, blank, 3)
+    kicker_header(s, "Instagram", "Instagram Profile", f"@{handles.get('instagram','N/A')}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, ig.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("following","N/A"), "Following", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, ig.get("posts","N/A"), "Total Posts", size=54, dark_bg=dark)
+    stat_block(s, 0.55, 3.10, 3.86, ig.get("engagement_rate","N/A"), "Engagement Rate", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.10, 3.86, ig.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.10, 3.86, ig.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
+    card(s, 0.55, 4.75, 12.23, 1.75, "Bio & Positioning", ig.get("bio_summary",""), dark_bg=dark)
+    footer_bar(s, 3, dark_bg=dark)
 
     # ── SLIDE 4: Instagram Content Strategy (light) ───────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Instagram", "Content Strategy", f"Content mix from the most recent {ig_raw.get('post_count',12)} posts")
+    s, dark = start_slide(prs, blank, 4)
+    kicker_header(s, "Instagram", "Content Strategy", f"Content mix from the most recent {ig_raw.get('post_count',12)} posts", dark_bg=dark)
     img_c = ig_raw.get("img_count",0); car_c = ig_raw.get("car_count",0); vid_c = ig_raw.get("vid_count",0)
     total = max(img_c+car_c+vid_c, 1)
     cd = ChartData()
@@ -822,112 +838,98 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
     for lbl, cnt, y in [("Videos / Reels",vid_c,2.10),("Carousels",car_c,3.25),("Images",img_c,4.40)]:
         pct = int(round(cnt/total*100))
-        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} posts", size=32)
-    card(s, 6.85, 5.55, 5.60, 1.00, "Instagram Strength", ig.get("strength",""))
-    footer_bar(s, 4)
+        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
+    card(s, 6.85, 5.55, 5.60, 1.00, "Instagram Strength", ig.get("strength",""), dark_bg=dark)
+    footer_bar(s, 4, dark_bg=dark)
 
-    # ── SLIDE 5: Facebook Page (light) ─────────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Facebook", "Facebook Page", handles.get('facebook','N/A'))
-    stat_block(s, 0.55, 1.75, 3.86, fb.get("followers","N/A"), "Page Followers", size=54)
-    stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("following","N/A"), "Following", size=54)
-    stat_block(s, 8.92, 1.75, 3.86, fb.get("rating","N/A"), "Page Rating", size=54)
-    stat_block(s, 0.55, 3.10, 3.86, fb.get("is_verified","No"), "Verified", size=32)
-    stat_block(s, 4.73, 3.10, 3.86, str(fb.get("category","N/A"))[:18], "Category", size=32)
-    stat_block(s, 8.92, 3.10, 3.86, "Facebook", "Platform", size=32)
-    card(s, 0.55, 4.75, 12.23, 1.75, "Profile Gap", fb.get("about","N/A"))
-    footer_bar(s, 5)
+    # ── SLIDE 5: Facebook Page (dark) ─────────────────────────
+    s, dark = start_slide(prs, blank, 5)
+    kicker_header(s, "Facebook", "Facebook Page", handles.get('facebook','N/A'), dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, fb.get("followers","N/A"), "Page Followers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("following","N/A"), "Following", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, fb.get("rating","N/A"), "Page Rating", size=54, dark_bg=dark)
+    stat_block(s, 0.55, 3.10, 3.86, fb.get("is_verified","No"), "Verified", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.10, 3.86, str(fb.get("category","N/A"))[:18], "Category", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.10, 3.86, "Facebook", "Platform", size=32, dark_bg=dark)
+    card(s, 0.55, 4.75, 12.23, 1.75, "Profile Gap", fb.get("about","N/A"), dark_bg=dark)
+    footer_bar(s, 5, dark_bg=dark)
 
     # ── SLIDE 6: Facebook Insights (light) ─────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Facebook", "Facebook Insights", "Page details and strategic analysis")
+    s, dark = start_slide(prs, blank, 6)
+    kicker_header(s, "Facebook", "Facebook Insights", "Page details and strategic analysis", dark_bg=dark)
     branded_table(s, ["Detail","Value"], [
         ["Address", str(fb_raw.get("address","N/A") or "N/A")],
         ["Phone",   str(fb_raw.get("phone","N/A")   or "N/A")],
         ["Email",   str(fb_raw.get("email","N/A")   or "N/A")],
         ["Website", str(fb_raw.get("website","N/A") or "N/A")],
-    ], 0.55, 1.75, 5.60, 2.60)
-    card(s, 6.75, 1.75, 5.70, 1.35, "Strength", fb.get("strength","N/A"))
-    card(s, 6.75, 3.25, 5.70, 1.90, "Recommendation", fb.get("recommendation","N/A"))
+    ], 0.55, 1.75, 5.60, 2.60, dark_bg=dark)
+    card(s, 6.75, 1.75, 5.70, 1.35, "Strength", fb.get("strength","N/A"), dark_bg=dark)
+    card(s, 6.75, 3.25, 5.70, 1.90, "Recommendation", fb.get("recommendation","N/A"), dark_bg=dark)
     filled = sum(1 for v in [fb_raw.get("address"),fb_raw.get("phone"),fb_raw.get("email"),fb_raw.get("website")] if v)
-    stat_block(s, 0.55, 4.75, 5.60, f"{filled} / 4", "Profile Fields Completed", size=54)
-    footer_bar(s, 6)
+    stat_block(s, 0.55, 4.75, 5.60, f"{filled} / 4", "Profile Fields Completed", size=54, dark_bg=dark)
+    footer_bar(s, 6, dark_bg=dark)
 
-    # ── SLIDE 7: YouTube Channel (light) ────────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "YouTube", "YouTube Channel", handles.get('youtube','N/A'))
+    # ── SLIDE 7: YouTube Channel (dark) ────────────────────────
+    s, dark = start_slide(prs, blank, 7)
+    kicker_header(s, "YouTube", "YouTube Channel", handles.get('youtube','N/A'), dark_bg=dark)
     tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:220],
-       0.55, 1.62, 12.23, 0.55, size=12.5, color=TEXT_GRAY, font=FONT_MONO_LT)
-    stat_block(s, 0.55, 2.50, 3.86, yt.get("subscribers","N/A"), "Subscribers", size=54)
-    stat_block(s, 4.73, 2.50, 3.86, yt.get("videos","N/A"), "Total Videos", size=54)
-    stat_block(s, 8.92, 2.50, 3.86, yt.get("views","N/A"), "Total Views", size=54)
-    stat_block(s, 0.55, 3.85, 3.86, yt.get("is_verified","No"), "Verified", size=32)
-    stat_block(s, 4.73, 3.85, 3.86, yt.get("joined","N/A"), "Joined Date", size=32)
-    stat_block(s, 8.92, 3.85, 3.86, "YouTube", "Platform", size=32)
-    card(s, 0.55, 5.35, 12.23, 1.15, "Reach Signal", yt.get("strength",""))
-    footer_bar(s, 7)
+       0.55, 1.62, 12.23, 0.55, size=12.5, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
+    stat_block(s, 0.55, 2.50, 3.86, yt.get("subscribers","N/A"), "Subscribers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 2.50, 3.86, yt.get("videos","N/A"), "Total Videos", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 2.50, 3.86, yt.get("views","N/A"), "Total Views", size=54, dark_bg=dark)
+    stat_block(s, 0.55, 3.85, 3.86, yt.get("is_verified","No"), "Verified", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.85, 3.86, yt.get("joined","N/A"), "Joined Date", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.85, 3.86, "YouTube", "Platform", size=32, dark_bg=dark)
+    card(s, 0.55, 5.35, 12.23, 1.15, "Reach Signal", yt.get("strength",""), dark_bg=dark)
+    footer_bar(s, 7, dark_bg=dark)
 
     # ── SLIDE 8: YouTube Insights (light) ────────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "YouTube", "Channel Insights", "Channel performance and strategic analysis")
+    s, dark = start_slide(prs, blank, 8)
+    kicker_header(s, "YouTube", "Channel Insights", "Channel performance and strategic analysis", dark_bg=dark)
     branded_table(s, ["Metric","Value"], [
         ["Subscribers",  yt.get("subscribers","N/A")],
         ["Total Videos", yt.get("videos","N/A")],
         ["Total Views",  yt.get("views","N/A")],
         ["Channel Age",  yt.get("joined","N/A")],
-    ], 0.55, 1.65, 5.60, 2.75)
+    ], 0.55, 1.65, 5.60, 2.75, dark_bg=dark)
     try:
         vpv = int(str(yt.get("views","0")).replace(",","")) // max(int(str(yt.get("videos","1")).replace(",","")),1)
         vpv_str = f"{vpv:,}"
     except:
         vpv_str = "N/A"
-    stat_block(s, 0.55, 4.75, 5.60, vpv_str, "Views Per Video (Est.)", size=54)
-    card(s, 6.75, 1.65, 5.70, 1.75, "Strength", yt.get("strength","N/A"))
-    card(s, 6.75, 3.60, 5.70, 2.35, "Recommendation", yt.get("recommendation","N/A"))
-    footer_bar(s, 8)
+    stat_block(s, 0.55, 4.75, 5.60, vpv_str, "Views Per Video (Est.)", size=54, dark_bg=dark)
+    card(s, 6.75, 1.65, 5.70, 1.75, "Strength", yt.get("strength","N/A"), dark_bg=dark)
+    card(s, 6.75, 3.60, 5.70, 2.35, "Recommendation", yt.get("recommendation","N/A"), dark_bg=dark)
+    footer_bar(s, 8, dark_bg=dark)
 
-    # ── SLIDE 9: LinkedIn (light) ──────────────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "LinkedIn", "LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}")
-    stat_block(s, 0.55, 1.75, 3.86, li.get("followers","N/A"), "Followers", size=54)
-    stat_block(s, 4.73, 1.75, 3.86, li.get("employees","N/A"), "Employees", size=54)
-    stat_block(s, 8.92, 1.75, 3.86, "LinkedIn", "Platform", size=54)
-    card(s, 0.55, 3.25, 12.23, 1.15, "Company Summary", li.get("summary","N/A"))
-    card(s, 0.55, 4.75, 5.95, 1.80, "Strength", li.get("strength","N/A"))
-    card(s, 6.65, 4.75, 5.80, 1.80, "Recommendation", li.get("recommendation","N/A"))
-    footer_bar(s, 9)
+    # ── SLIDE 9: LinkedIn (dark) ──────────────────────────────
+    s, dark = start_slide(prs, blank, 9)
+    kicker_header(s, "LinkedIn", "LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, li.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, li.get("employees","N/A"), "Employees", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, "LinkedIn", "Platform", size=54, dark_bg=dark)
+    card(s, 0.55, 3.25, 12.23, 1.15, "Company Summary", li.get("summary","N/A"), dark_bg=dark)
+    card(s, 0.55, 4.75, 5.95, 1.80, "Strength", li.get("strength","N/A"), dark_bg=dark)
+    card(s, 6.65, 4.75, 5.80, 1.80, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
+    footer_bar(s, 9, dark_bg=dark)
 
     # ── SLIDE 10: LinkedIn Strategic Analysis (light) ─────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "LinkedIn", "Strategic Analysis", "Professional presence and B2B opportunities")
+    s, dark = start_slide(prs, blank, 10)
+    kicker_header(s, "LinkedIn", "Strategic Analysis", "Professional presence and B2B opportunities", dark_bg=dark)
     branded_table(s, ["Metric","Value","Insight"], [
         ["Followers",     li.get("followers","N/A"), "Professional audience size"],
         ["Employees",     li.get("employees","N/A"), "Company scale indicator"],
         ["Content Focus", "B2B & Professional",      "Key content strategy"],
         ["Best Post Type","Articles & Updates",      "Highest LinkedIn engagement"],
         ["Posting Freq.", "2–3x per week",           "LinkedIn best practice"],
-    ], 0.55, 1.65, 12.23, 2.85)
-    card(s, 0.55, 4.85, 5.95, 1.65, "Strength", li.get("strength","N/A"))
-    card(s, 6.65, 4.85, 5.80, 1.65, "Recommendation", li.get("recommendation","N/A"))
-    footer_bar(s, 10)
+    ], 0.55, 1.65, 12.23, 2.85, dark_bg=dark)
+    card(s, 0.55, 4.85, 5.95, 1.65, "Strength", li.get("strength","N/A"), dark_bg=dark)
+    card(s, 6.65, 4.85, 5.80, 1.65, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
+    footer_bar(s, 10, dark_bg=dark)
 
     # ── SLIDE 11: Cross-Platform Comparison (dark) ────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_DARK)
-    brand_mark(s, dark_bg=True, top_right=True)
-    kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=True)
+    s, dark = start_slide(prs, blank, 11)
+    kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=dark)
     ig_f = parse_num(ig.get("followers",0)); fb_f = parse_num(fb.get("followers",0))
     yt_f = parse_num(yt.get("subscribers",0)); li_f = parse_num(li.get("followers",0))
     cd2 = ChartData()
@@ -942,14 +944,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     chart2.value_axis.tick_labels.font.size = Pt(10); chart2.value_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
     for i,(lbl,val) in enumerate([("Instagram",ig.get("followers","N/A")),("Facebook",fb.get("followers","N/A")),
                                     ("YouTube",yt.get("subscribers","N/A")),("LinkedIn",li.get("followers","N/A"))]):
-        stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=True)
-    footer_bar(s, 11, dark_bg=True)
+        stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=dark)
+    footer_bar(s, 11, dark_bg=dark)
 
     # ── SLIDE 12: Engagement Benchmarks (light) ───────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Benchmarks", "Engagement Benchmarks", "Performance metrics vs. industry standards")
+    s, dark = start_slide(prs, blank, 12)
+    kicker_header(s, "Benchmarks", "Engagement Benchmarks", "Performance metrics vs. industry standards", dark_bg=dark)
     def er_status(val):
         try:
             v = float(str(val).replace("%",""))
@@ -963,36 +963,32 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["YouTube",  "Subscribers",       yt.get("subscribers","N/A"),    "Varies by niche",    "—"],
         ["YouTube",  "Views / Video",     vpv_str, ">1,000 is good", "—"],
         ["LinkedIn", "Followers",         li.get("followers","N/A"),      "Varies by industry", "—"],
-    ], 0.55, 1.65, 12.23, 4.90)
-    footer_bar(s, 12)
+    ], 0.55, 1.65, 12.23, 4.90, dark_bg=dark)
+    footer_bar(s, 12, dark_bg=dark)
 
-    # ── SLIDE 13: Strengths & Gaps (light) ────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_LIGHT)
-    brand_mark(s, dark_bg=False, top_right=True)
-    kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps", "What's working, and what needs attention")
-    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform", cp.get("strongest_platform","N/A"))
-    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work", cp.get("weakest_platform","N/A"))
-    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"))
-    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity", cp.get("growth_opportunity","N/A"))
-    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary", analysis.get("overall_summary","N/A"))
-    footer_bar(s, 13)
+    # ── SLIDE 13: Strengths & Gaps (dark) ────────────────────
+    s, dark = start_slide(prs, blank, 13)
+    kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps", "What's working, and what needs attention", dark_bg=dark)
+    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform", cp.get("strongest_platform","N/A"), dark_bg=dark)
+    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work", cp.get("weakest_platform","N/A"), dark_bg=dark)
+    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
+    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity", cp.get("growth_opportunity","N/A"), dark_bg=dark)
+    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary", analysis.get("overall_summary","N/A"), dark_bg=dark)
+    footer_bar(s, 13, dark_bg=dark)
 
-    # ── SLIDE 14: Recommendations (dark) ──────────────────────
-    s = prs.slides.add_slide(blank)
-    bg(s, prs, BG_DARK)
-    brand_mark(s, dark_bg=True, top_right=True)
+    # ── SLIDE 14: Recommendations (light) ──────────────────────
+    s, dark = start_slide(prs, blank, 14)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
-    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65, size=26, color=TEXT_LIGHT, font=FONT_SERIF)
-    tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35, size=13, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
-    card(s, 0.55, 1.70, 5.96, 1.30, "Instagram", ig.get("recommendation","N/A"), dark_bg=True)
-    card(s, 6.83, 1.70, 5.96, 1.30, "YouTube", yt.get("recommendation","N/A"), dark_bg=True)
-    card(s, 0.55, 3.30, 5.96, 1.30, "Facebook", fb.get("recommendation","N/A"), dark_bg=True)
-    card(s, 6.83, 3.30, 5.96, 1.30, "LinkedIn", li.get("recommendation","N/A"), dark_bg=True)
-    card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=True)
+    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65, size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
+    tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35, size=13, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
+    card(s, 0.55, 1.70, 5.96, 1.30, "Instagram", ig.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 6.83, 1.70, 5.96, 1.30, "YouTube", yt.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 0.55, 3.30, 5.96, 1.30, "Facebook", fb.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 6.83, 3.30, 5.96, 1.30, "LinkedIn", li.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=dark)
     tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Claude AI",
        0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
-    footer_bar(s, 14, dark_bg=True)
+    footer_bar(s, 14, dark_bg=dark)
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
