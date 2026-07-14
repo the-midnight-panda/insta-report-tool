@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 load_dotenv()
 SEARCHAPI_KEY     = os.getenv("SEARCHAPI_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+APIFY_API_KEY     = os.getenv("APIFY_API_KEY")
 
 app = Flask(__name__)
 
@@ -292,7 +293,6 @@ def discover_all_handles(website_url):
 # ═══════════════════════════════════════════════════════════════
 
 def _get_first(d, keys, default=None):
-    """Try multiple possible field names, return the first one that exists."""
     for k in keys:
         v = d.get(k)
         if v not in (None, ""):
@@ -300,7 +300,6 @@ def _get_first(d, keys, default=None):
     return default
 
 def _to_timestamp(val):
-    """Best-effort parse of a post timestamp into a unix epoch (seconds)."""
     if val is None:
         return None
     try:
@@ -309,9 +308,12 @@ def _to_timestamp(val):
         s = str(val)
         if s.isdigit():
             return float(s)
-        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
+                    "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
-                return datetime.strptime(s[:19], fmt[:len(fmt)]).timestamp()
+                clean = s[:26].rstrip("Z")
+                return datetime.strptime(clean, fmt.rstrip("Z").rstrip("%z")).timestamp()
             except:
                 continue
     except:
@@ -319,17 +321,20 @@ def _to_timestamp(val):
     return None
 
 def _post_permalink(post, username):
-    link = _get_first(post, ["permalink","url","link","post_url"])
-    if link:
+    # Apify uses 'url', SearchAPI uses 'link' and 'permalink'
+    link = _get_first(post, ["url","permalink","link","post_url"])
+    if link and link.startswith("http"):
         return link
-    shortcode = _get_first(post, ["shortcode","code"])
+    shortcode = _get_first(post, ["shortCode","shortcode","code","id"])
     if shortcode:
         return f"https://www.instagram.com/p/{shortcode}/"
     return "N/A"
 
 def _classify_post(post):
-    t = str(post.get("type","")).lower()
-    if "video" in t or "reel" in t:
+    # Apify: "Image", "Video", "Sidecar"
+    # SearchAPI: "image", "video", "reel", "carousel", "sidecar"
+    t = str(_get_first(post, ["type","productType","product_type"], "")).lower()
+    if "video" in t or "reel" in t or "clip" in t:
         return "reels"
     elif "carousel" in t or "sidecar" in t or "album" in t:
         return "carousels"
@@ -351,7 +356,7 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
     total_shares   = sum(shares_known) if shares_known else 0
     total_reposts  = sum(reposts_known) if reposts_known else 0
 
-    avg_engagement = (total_likes + total_comments + total_shares + total_reposts) / n
+    avg_engagement  = (total_likes + total_comments + total_shares + total_reposts) / n
     er_per_follower = (total_likes + total_comments) / n / followers * 100 if followers else 0
 
     scored = sorted(posts_group, key=_score, reverse=True)
@@ -359,17 +364,17 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
     worst  = scored[-1]
 
     result = {
-        "n":              n,
-        "avg_engagement": round(avg_engagement, 1),
+        "n":               n,
+        "avg_engagement":  round(avg_engagement, 1),
         "er_per_follower": f"{er_per_follower:.2f}%",
-        "avg_likes":      round(total_likes / n),
-        "avg_comments":   round(total_comments / n),
-        "avg_shares":     round(total_shares / n) if shares_known else "N/A",
-        "avg_reposts":    round(total_reposts / n) if reposts_known else "N/A",
-        "top_score":      _score(top),
-        "top_url":        top["url"],
-        "worst_score":    _score(worst),
-        "worst_url":      worst["url"],
+        "avg_likes":       round(total_likes / n),
+        "avg_comments":    round(total_comments / n),
+        "avg_shares":      round(total_shares / n) if shares_known else "N/A",
+        "avg_reposts":     round(total_reposts / n) if reposts_known else "N/A",
+        "top_score":       _score(top),
+        "top_url":         top["url"],
+        "worst_score":     _score(worst),
+        "worst_url":       worst["url"],
     }
 
     if is_reels:
@@ -381,20 +386,54 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
             result["max_views"]     = max_v["views"]
             result["max_views_url"] = max_v["url"]
         else:
-            result["max_views"] = "N/A"
+            result["max_views"]     = "N/A"
             result["max_views_url"] = "N/A"
-        result["like_rate"]    = f"{(total_likes/n/followers*100):.2f}%" if followers else "N/A"
+        result["like_rate"]    = f"{(total_likes/n/followers*100):.2f}%"    if followers else "N/A"
         result["comment_rate"] = f"{(total_comments/n/followers*100):.2f}%" if followers else "N/A"
-        result["share_rate"]   = f"{(total_shares/n/followers*100):.2f}%" if (followers and shares_known) else "N/A"
-        result["repost_rate"]  = f"{(total_reposts/n/followers*100):.2f}%" if (followers and reposts_known) else "N/A"
+        result["share_rate"]   = f"{(total_shares/n/followers*100):.2f}%"   if (followers and shares_known) else "N/A"
+        result["repost_rate"]  = f"{(total_reposts/n/followers*100):.2f}%"  if (followers and reposts_known) else "N/A"
         result["er_by_view"]   = f"{((total_likes+total_comments+total_shares+total_reposts)/total_views*100):.2f}%" if total_views else "N/A"
 
     return result
+
+
+def fetch_instagram_posts_via_apify(username):
+    """
+    Fetch last 30 posts from Apify Instagram Post Scraper.
+    Falls back to empty list if Apify key missing or call fails.
+    """
+    if not APIFY_API_KEY:
+        print("   ⚠️ No APIFY_API_KEY — cannot fetch 30 posts")
+        return []
+    try:
+        print(f"   🔄 Apify: fetching 30 posts for @{username} (may take 60-90s)...")
+        r = requests.post(
+            "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 120},
+            json={
+                "username":       [username],
+                "resultsLimit":   30,
+                "addParentData":  False,
+            },
+            timeout=150
+        )
+        if r.status_code == 200:
+            posts = r.json()
+            print(f"   ✅ Apify returned {len(posts)} posts")
+            return posts
+        else:
+            print(f"   ⚠️ Apify returned status {r.status_code}")
+            return []
+    except Exception as e:
+        print(f"   ⚠️ Apify error: {e}")
+        return []
+
 
 def fetch_instagram(username):
     print(f"📸 Fetching Instagram: @{username}")
     data = {}
     try:
+        # ── Profile data from SearchAPI (followers, bio, etc.) ────────
         r = requests.get(
             "https://www.searchapi.io/api/v1/search",
             params={"engine":"instagram_profile","username":username,
@@ -403,111 +442,134 @@ def fetch_instagram(username):
         if r.status_code != 200:
             return data
 
-        ig    = r.json()
-        p     = ig.get("profile", {})
-        posts_raw = ig.get("posts", [])[:30]   # ── last 30 posts, combined ──
+        ig = r.json()
+        p  = ig.get("profile", {})
 
-        followers    = p.get("followers", "N/A")
-        following    = p.get("following", "N/A")
-        total_posts  = p.get("posts", "N/A")
-        bio          = p.get("biography", "")
-        full_name    = p.get("full_name", "")
-        is_verified  = p.get("is_verified", False)
-        is_business  = p.get("is_business", False)
+        followers   = p.get("followers", "N/A")
+        following   = p.get("following", "N/A")
+        total_posts = p.get("posts", "N/A")
+        bio         = p.get("biography", "")
+        full_name   = p.get("full_name", "")
+        is_verified = p.get("is_verified", False)
+        is_business = p.get("is_business", False)
 
         try:
             followers_n = int(str(followers).replace(",",""))
         except:
             followers_n = 0
 
-        # ── DEBUG: print raw keys of first post so we can confirm field names ──
-        if posts_raw:
-            print(f"   🔍 Raw keys on first post: {list(posts_raw[0].keys())}")
+        # ── 30 posts from Apify, fallback to SearchAPI's 12 ──────────
+        apify_posts = fetch_instagram_posts_via_apify(username)
+        if apify_posts:
+            posts_raw = apify_posts
+            source    = "apify"
+        else:
+            posts_raw = ig.get("posts", [])
+            source    = "searchapi"
+            print(f"   ↩️  Using SearchAPI posts ({len(posts_raw)} posts)")
 
-        # ── Parse every post into a normalized dict ──────────────────
-        parsed = []
-        img_c = car_c = vid_c = 0
+        print(f"   🔍 Source: {source} | First post keys: {list(posts_raw[0].keys())[:12] if posts_raw else 'none'}")
+
+        # ── Parse every post ──────────────────────────────────────────
+        parsed  = []
+        img_c   = car_c = vid_c = 0
+
         for post in posts_raw:
-            likes    = post.get("likes", 0) or 0
-            comments = post.get("comments", 0) or 0
-            shares   = _get_first(post, ["share_count","shares","reshare_count","send_count"])
-            reposts  = _get_first(post, ["repost_count","reposts","reshares"])
-            views    = _get_first(post, ["view_count","views","play_count","plays"])
-            url      = _post_permalink(post, username)
-            ts       = _to_timestamp(_get_first(post, ["timestamp","taken_at","created_at","date"]))
-            ptype    = _classify_post(post)
+            if source == "apify":
+                likes    = post.get("likesCount", 0) or 0
+                comments = post.get("commentsCount", 0) or 0
+                shares   = _get_first(post, ["sharesCount","share_count","shares"])
+                reposts  = _get_first(post, ["repostsCount","repost_count","reposts"])
+                views    = _get_first(post, ["videoViewCount","viewsCount","videoPlayCount","views"])
+                url      = _get_first(post, ["url","permalink","link"]) or "N/A"
+                ts       = _to_timestamp(_get_first(post, ["timestamp","iso_date"]))
+            else:
+                # SearchAPI field names (confirmed from debug route)
+                likes    = post.get("likes", 0) or 0
+                comments = post.get("comments", 0) or 0
+                shares   = _get_first(post, ["share_count","shares","reshare_count"])
+                reposts  = _get_first(post, ["repost_count","reposts","reshares"])
+                views    = _get_first(post, ["views","view_count","play_count"])
+                url      = _get_first(post, ["permalink","link","url","post_url"]) or "N/A"
+                ts       = _to_timestamp(_get_first(post, ["iso_date","timestamp","taken_at","created_at"]))
 
-            if ptype == "images":    img_c += 1
+            ptype = _classify_post(post)
+            if ptype == "images":     img_c += 1
             elif ptype == "carousels": car_c += 1
-            else: vid_c += 1
+            else:                      vid_c += 1
 
             parsed.append({
-                "type": ptype, "likes": likes, "comments": comments,
-                "shares": (int(shares) if shares is not None else None),
+                "type":    ptype,
+                "likes":   likes,
+                "comments":comments,
+                "shares":  (int(shares)  if shares  is not None else None),
                 "reposts": (int(reposts) if reposts is not None else None),
-                "views": (int(views) if views is not None else None),
-                "url": url, "ts": ts,
+                "views":   (int(views)   if views   is not None else None),
+                "url":     url,
+                "ts":      ts,
             })
 
-        post_count = len(parsed)
+        post_count      = len(parsed)
         images_group    = [p for p in parsed if p["type"] == "images"]
         carousels_group = [p for p in parsed if p["type"] == "carousels"]
         reels_group     = [p for p in parsed if p["type"] == "reels"]
 
-        # ── Overall sample-level engagement ───────────────────────────
-        total_l = sum(p["likes"] for p in parsed)
-        total_c = sum(p["comments"] for p in parsed)
+        # ── Overall engagement ────────────────────────────────────────
+        total_l          = sum(p["likes"] for p in parsed)
+        total_c          = sum(p["comments"] for p in parsed)
         engagement_total = total_l + total_c
-        eng_rate = f"{(engagement_total/post_count/followers_n*100):.2f}%" if (post_count and followers_n) else "N/A"
+        eng_rate         = f"{(engagement_total/post_count/followers_n*100):.2f}%" if (post_count and followers_n) else "N/A"
 
-        reel_l = sum(p["likes"] for p in reels_group)
+        reel_l = sum(p["likes"]    for p in reels_group)
         reel_c = sum(p["comments"] for p in reels_group)
         eng_rate_reels = (f"{(reel_l+reel_c)/len(reels_group)/followers_n*100:.2f}%"
-                           if (reels_group and followers_n) else "N/A")
+                          if (reels_group and followers_n) else "N/A")
 
-        # ── Posting frequency (posts per week) ────────────────────────
+        # ── Posting frequency ─────────────────────────────────────────
         timestamps = [p["ts"] for p in parsed if p["ts"]]
         if len(timestamps) >= 2:
-            span_days = max((max(timestamps) - min(timestamps)) / 86400, 1)
+            span_days         = max((max(timestamps) - min(timestamps)) / 86400, 1)
             posting_frequency = f"{(post_count / span_days * 7):.1f} / week"
         else:
             posting_frequency = "N/A"
 
-        # ── Per-group metrics ──────────────────────────────────────────
-        images_metrics    = _compute_group_metrics(images_group, followers_n)
+        # ── Per-group metrics ─────────────────────────────────────────
+        images_metrics    = _compute_group_metrics(images_group,    followers_n)
         carousels_metrics = _compute_group_metrics(carousels_group, followers_n)
-        reels_metrics      = _compute_group_metrics(reels_group, followers_n, is_reels=True)
+        reels_metrics     = _compute_group_metrics(reels_group,     followers_n, is_reels=True)
 
         data = {
-            "username":     username,
-            "full_name":    full_name,
-            "followers":    str(followers),
-            "following":    str(following),
-            "posts":        str(total_posts),
-            "bio":          bio,
-            "is_verified":  "Yes" if is_verified else "No",
-            "is_business":  "Yes" if is_business else "No",
+            "username":    username,
+            "full_name":   full_name,
+            "followers":   str(followers),
+            "following":   str(following),
+            "posts":       str(total_posts),
+            "bio":         bio,
+            "is_verified": "Yes" if is_verified else "No",
+            "is_business": "Yes" if is_business else "No",
 
-            "sample_size":        post_count,
-            "engagement_rate":    eng_rate,
+            "sample_size":           post_count,
+            "engagement_rate":       eng_rate,
             "engagement_rate_reels": eng_rate_reels,
-            "engagement_total":   engagement_total,
-            "posting_frequency":  posting_frequency,
+            "engagement_total":      engagement_total,
+            "posting_frequency":     posting_frequency,
 
-            "img_count": img_c, "car_count": car_c, "vid_count": vid_c,
+            "img_count":  img_c,
+            "car_count":  car_c,
+            "vid_count":  vid_c,
             "post_count": post_count,
 
             "images":    images_metrics,
             "carousels": carousels_metrics,
             "reels":     reels_metrics,
         }
-        print(f"   ✅ {followers} followers | Sample: {post_count} posts "
-              f"({img_c} img / {car_c} carousel / {vid_c} reels) | ER: {eng_rate}")
+        print(f"   ✅ {followers} followers | {post_count} posts ({img_c} img / {car_c} carousel / {vid_c} reels) | ER: {eng_rate}")
     except Exception as e:
         import traceback
         print(f"   ⚠️ Instagram failed: {e}")
         print(traceback.format_exc())
     return data
+
 
 def fetch_facebook(username):
     print(f"👥 Fetching Facebook: {username}")
@@ -524,7 +586,7 @@ def fetch_facebook(username):
                 "name":        p.get("name", username),
                 "followers":   str(p.get("followers",{}).get("count","N/A")),
                 "following":   str(p.get("following",{}).get("count","N/A")),
-                "category":    ", ".join(p.get("about",{}).get("category_formatted",[]) or []),
+                "category":    ", ".join(p.get("about",{}).get("category_formatted",[]) or []) or "N/A",
                 "about":       p.get("about",{}).get("description","") or p.get("about",{}).get("general_info",""),
                 "address":     p.get("address","") or "",
                 "phone":       p.get("phone","") or "",
@@ -538,6 +600,7 @@ def fetch_facebook(username):
         print(f"   ⚠️ Facebook failed: {e}")
     return data
 
+
 def fetch_youtube(channel_id):
     print(f"▶️  Fetching YouTube: {channel_id}")
     data = {}
@@ -547,7 +610,6 @@ def fetch_youtube(channel_id):
     else:
         param = "@" + raw
     print(f"   Using param: {param}")
-
     try:
         r = requests.get(
             "https://www.searchapi.io/api/v1/search",
@@ -572,6 +634,7 @@ def fetch_youtube(channel_id):
     except Exception as e:
         print(f"   ⚠️ YouTube failed: {e}")
     return data
+
 
 def fetch_linkedin(company_handle, brand_name=None):
     print(f"💼 Fetching LinkedIn: {company_handle}")
@@ -639,9 +702,9 @@ def fetch_linkedin(company_handle, brand_name=None):
                         data["employees"] = e
 
             for res in result_json.get("organic_results", []):
-                link    = res.get("link","")
-                snippet = res.get("snippet","")
-                title   = res.get("title","")
+                link     = res.get("link","")
+                snippet  = res.get("snippet","")
+                title    = res.get("title","")
                 all_text = f"{title} {snippet}"
                 sitelinks = res.get("sitelinks", [])
                 if isinstance(sitelinks, list):
@@ -789,11 +852,9 @@ def brand_mark(slide, dark_bg=False, top_right=False):
     outer = TEXT_LIGHT if dark_bg else TEXT_DARK
     inner = TEXT_DARK if dark_bg else TEXT_LIGHT
     if top_right:
-        dot_xs = [10.05, 10.29]
-        text_x = 10.58
+        dot_xs = [10.05, 10.29]; text_x = 10.58
     else:
-        dot_xs = [0.55, 0.79]
-        text_x = 1.08
+        dot_xs = [0.55, 0.79];   text_x = 1.08
     for ox in dot_xs:
         c1 = slide.shapes.add_shape(9, Inches(ox), Inches(0.45), Inches(0.16), Inches(0.16))
         c1.fill.solid(); c1.fill.fore_color.rgb = outer; c1.line.fill.background()
@@ -820,12 +881,7 @@ def kicker_header(slide, kicker, title, subtitle, dark_bg=False):
 
 def stat_block(slide, x, y, w, value, label, size=54, dark_bg=False):
     label_color = TEXT_GRAY_LT if dark_bg else TEXT_GRAY
-    if size >= 50:
-        vh = 0.95
-    elif size >= 40:
-        vh = 0.75
-    else:
-        vh = 0.55
+    vh = 0.95 if size >= 50 else (0.75 if size >= 40 else 0.55)
     tb(slide, value, x, y, w, vh, size=size, color=GOLD, font=FONT_STAT)
     tb(slide, label.upper(), x, y+vh+0.05, w, 0.30, size=9.5, color=label_color, font=FONT_MONO)
 
@@ -851,9 +907,7 @@ def card(slide, x, y, w, h, label, body, dark_bg=False):
 def branded_table(slide, headers, rows, x, y, w, h, dark_bg=False):
     cols = len(headers)
     tbl  = slide.shapes.add_table(len(rows)+1, cols, Inches(x), Inches(y), Inches(w), Inches(h)).table
-    try:
-        tbl.first_row = False
-        tbl.horz_banding = False
+    try: tbl.first_row = False; tbl.horz_banding = False
     except: pass
     cw = Inches(w/cols)
     for i in range(cols): tbl.columns[i].width = cw
@@ -934,7 +988,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     tb(s, niche, 0.55, 2.95, 11.50, 0.45, size=15, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
     tb(s, website_url.replace("https://","").replace("http://",""), 0.55, 3.42, 11.50, 0.35,
        size=11.5, color=GOLD, font=FONT_MONO)
-
     platform_labels = []
     if handles.get("instagram"): platform_labels.append("Instagram")
     if handles.get("facebook"):  platform_labels.append("Facebook")
@@ -942,13 +995,11 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     if handles.get("linkedin"):  platform_labels.append("LinkedIn")
     for i, label in enumerate(platform_labels):
         pill(s, 0.55 + i*2.12, 4.05, label)
-
     stat_block(s, 0.55, 5.05, 2.83, ig_raw.get("followers","N/A"), "Instagram Followers", size=44, dark_bg=True)
-    stat_block(s, 3.68, 5.05, 2.83, fb_raw.get("followers","N/A"), "Facebook Followers", size=44, dark_bg=True)
+    stat_block(s, 3.68, 5.05, 2.83, fb_raw.get("followers","N/A"), "Facebook Followers",  size=44, dark_bg=True)
     stat_block(s, 6.81, 5.05, 2.83, yt_raw.get("subscribers","N/A"), "YouTube Subscribers", size=44, dark_bg=True)
-    stat_block(s, 9.94, 5.05, 2.83, li_raw.get("followers","N/A"), "LinkedIn Followers", size=44, dark_bg=True)
-
-    tb(s, f"Powered by SearchAPI.io + Claude AI  ·  {website_url.replace('https://','').replace('http://','')}",
+    stat_block(s, 9.94, 5.05, 2.83, li_raw.get("followers","N/A"), "LinkedIn Followers",   size=44, dark_bg=True)
+    tb(s, f"Powered by SearchAPI.io + Apify + Claude AI  ·  {website_url.replace('https://','').replace('http://','')}",
        0.55, 6.85, 11.50, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
     ln = s.shapes.add_shape(1, Inches(0), Inches(7.46), Inches(13.33), Pt(0.75))
     ln.fill.solid(); ln.fill.fore_color.rgb = RGBColor(0x2A,0x2A,0x2A); ln.line.fill.background()
@@ -958,16 +1009,17 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     kicker_header(s, "Report Overview", "Social Media Overview", f"{brand} — all platforms at a glance", dark_bg=dark)
     branded_table(s, ["Platform","Handle","Followers","Key Metric","Status"], [
         ["Instagram", f"@{handles.get('instagram','N/A')}", ig_raw.get("followers","N/A"), f"ER: {ig_raw.get('engagement_rate','N/A')}", "Active" if handles.get("instagram") else "Not Found"],
-        ["Facebook",  handles.get("facebook","N/A"),        fb_raw.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",      "Active" if handles.get("facebook") else "Not Found"],
-        ["YouTube",   handles.get("youtube","N/A"),          yt_raw.get("subscribers","N/A"), f"Videos: {yt_raw.get('videos','N/A')}", "Active" if handles.get("youtube") else "Not Found"],
-        ["LinkedIn",  handles.get("linkedin","N/A"),         li_raw.get("followers","N/A"), f"Employees: {li_raw.get('employees','N/A')}", "Active" if handles.get("linkedin") else "Not Found"],
+        ["Facebook",  handles.get("facebook","N/A"),  fb_raw.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",       "Active" if handles.get("facebook") else "Not Found"],
+        ["YouTube",   handles.get("youtube","N/A"),   yt_raw.get("subscribers","N/A"), f"Videos: {yt_raw.get('videos','N/A')}", "Active" if handles.get("youtube") else "Not Found"],
+        ["LinkedIn",  handles.get("linkedin","N/A"),  li_raw.get("followers","N/A"), f"Employees: {li_raw.get('employees','N/A')}", "Active" if handles.get("linkedin") else "Not Found"],
     ], 0.55, 1.65, 12.23, 2.35, dark_bg=dark)
     card(s, 0.55, 4.35, 12.23, 2.15, "Overall Analysis", analysis.get("overall_summary",""), dark_bg=dark)
     footer_bar(s, 2, dark_bg=dark)
 
     # ── SLIDE 3: Instagram Overview (dark) ────────────────────
     s, dark = start_slide(prs, blank, 3)
-    kicker_header(s, "Instagram", "Instagram Overview", f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+    kicker_header(s, "Instagram", "Instagram Overview",
+                  f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
     stat_block(s, 0.55, 1.75, 3.86, ig_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("posts","N/A"), "Total Posts (all time)", size=54, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
@@ -979,7 +1031,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     # ── SLIDE 4: Instagram Content Strategy (light) ───────────
     s, dark = start_slide(prs, blank, 4)
-    kicker_header(s, "Instagram", "Content Strategy", f"Content mix from the last {ig_raw.get('sample_size',30)} posts", dark_bg=dark)
+    kicker_header(s, "Instagram", "Content Strategy",
+                  f"Content mix from the last {ig_raw.get('sample_size',30)} posts", dark_bg=dark)
     img_c = ig_raw.get("img_count",0); car_c = ig_raw.get("car_count",0); vid_c = ig_raw.get("vid_count",0)
     total = max(img_c+car_c+vid_c, 1)
     cd = ChartData()
@@ -998,7 +1051,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     # ── SLIDE 5: Images Performance (dark) ────────────────────
     s, dark = start_slide(prs, blank, 5)
-    kicker_header(s, "Instagram — Images", "Images Performance", f"Based on {ig_images.get('n',0)} image posts from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
+    kicker_header(s, "Instagram — Images", "Images Performance",
+                  f"Based on {ig_images.get('n',0)} image posts from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
     stat_block(s, 0.55, 1.75, 3.86, ig_images.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, ig_images.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, ig_images.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
@@ -1015,7 +1069,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     # ── SLIDE 6: Carousels Performance (light) ────────────────
     s, dark = start_slide(prs, blank, 6)
-    kicker_header(s, "Instagram — Carousels", "Carousels Performance", f"Based on {ig_carousels.get('n',0)} carousel posts from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
+    kicker_header(s, "Instagram — Carousels", "Carousels Performance",
+                  f"Based on {ig_carousels.get('n',0)} carousel posts from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
     stat_block(s, 0.55, 1.75, 3.86, ig_carousels.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, ig_carousels.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, ig_carousels.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
@@ -1032,7 +1087,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     # ── SLIDE 7: Reels Performance (dark) ─────────────────────
     s, dark = start_slide(prs, blank, 7)
-    kicker_header(s, "Instagram — Reels", "Reels Performance", f"Based on {ig_reels.get('n',0)} reels from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
+    kicker_header(s, "Instagram — Reels", "Reels Performance",
+                  f"Based on {ig_reels.get('n',0)} reels from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
     stat_block(s, 0.55, 1.75, 3.86, ig_reels.get("avg_engagement","N/A"), "Avg Engagement / Reel", size=40, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, ig_reels.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=40, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, ig_reels.get("avg_views","N/A"), "Avg Views / Reel", size=40, dark_bg=dark)
@@ -1059,7 +1115,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("following","N/A"), "Following", size=54, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, fb.get("rating","N/A"), "Page Rating", size=54, dark_bg=dark)
     stat_block(s, 0.55, 3.10, 3.86, fb_raw.get("is_verified","No"), "Verified", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, str(fb.get("category","N/A"))[:18], "Category", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.10, 3.86, str(fb.get("category","N/A") or "N/A")[:18], "Category", size=32, dark_bg=dark)
     stat_block(s, 8.92, 3.10, 3.86, "Facebook", "Platform", size=32, dark_bg=dark)
     card(s, 0.55, 4.75, 12.23, 1.75, "Profile Gap", fb.get("about","N/A"), dark_bg=dark)
     footer_bar(s, 8, dark_bg=dark)
@@ -1114,7 +1170,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     # ── SLIDE 12: LinkedIn (light) ──────────────────────────────
     s, dark = start_slide(prs, blank, 12)
-    kicker_header(s, "LinkedIn", "LinkedIn Company Page", f"linkedin.com/company/{handles.get('linkedin','N/A')}", dark_bg=dark)
+    kicker_header(s, "LinkedIn", "LinkedIn Company Page",
+                  f"linkedin.com/company/{handles.get('linkedin','N/A')}", dark_bg=dark)
     stat_block(s, 0.55, 1.75, 3.86, li_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, li_raw.get("employees","N/A"), "Employees", size=54, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, "LinkedIn", "Platform", size=54, dark_bg=dark)
@@ -1129,9 +1186,9 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     branded_table(s, ["Metric","Value","Insight"], [
         ["Followers",     li_raw.get("followers","N/A"), "Professional audience size"],
         ["Employees",     li_raw.get("employees","N/A"), "Company scale indicator"],
-        ["Content Focus", "B2B & Professional",      "Key content strategy"],
-        ["Best Post Type","Articles & Updates",      "Highest LinkedIn engagement"],
-        ["Posting Freq.", "2–3x per week",           "LinkedIn best practice"],
+        ["Content Focus", "B2B & Professional",          "Key content strategy"],
+        ["Best Post Type","Articles & Updates",           "Highest LinkedIn engagement"],
+        ["Posting Freq.", "2–3x per week",                "LinkedIn best practice"],
     ], 0.55, 1.65, 12.23, 2.85, dark_bg=dark)
     card(s, 0.55, 4.85, 5.95, 1.65, "Strength", li.get("strength","N/A"), dark_bg=dark)
     card(s, 6.65, 4.85, 5.80, 1.65, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
@@ -1145,58 +1202,69 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd2 = ChartData()
     cd2.categories = ["Instagram","Facebook","YouTube","LinkedIn"]
     cd2.add_series("Followers",(ig_f,fb_f,yt_f,li_f))
-    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55),Inches(1.75),Inches(12.23),Inches(3.65),cd2).chart
+    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED,
+                                 Inches(0.55),Inches(1.75),Inches(12.23),Inches(3.65),cd2).chart
     chart2.has_legend = False
     pt0 = chart2.plots[0].series[0]
     for i in range(4):
         pt0.points[i].format.fill.solid(); pt0.points[i].format.fill.fore_color.rgb = GOLD
-    chart2.category_axis.tick_labels.font.size = Pt(11); chart2.category_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
-    chart2.value_axis.tick_labels.font.size = Pt(10); chart2.value_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
-    for i,(lbl,val) in enumerate([("Instagram",ig_raw.get("followers","N/A")),("Facebook",fb_raw.get("followers","N/A")),
-                                    ("YouTube",yt_raw.get("subscribers","N/A")),("LinkedIn",li_raw.get("followers","N/A"))]):
+    chart2.category_axis.tick_labels.font.size = Pt(11)
+    chart2.category_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
+    chart2.value_axis.tick_labels.font.size = Pt(10)
+    chart2.value_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
+    for i,(lbl,val) in enumerate([
+        ("Instagram", ig_raw.get("followers","N/A")),
+        ("Facebook",  fb_raw.get("followers","N/A")),
+        ("YouTube",   yt_raw.get("subscribers","N/A")),
+        ("LinkedIn",  li_raw.get("followers","N/A")),
+    ]):
         stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=dark)
     footer_bar(s, 14, dark_bg=dark)
 
     # ── SLIDE 15: Engagement Benchmarks (dark) ────────────────
     s, dark = start_slide(prs, blank, 15)
-    kicker_header(s, "Benchmarks", "Engagement Benchmarks", "Performance metrics vs. industry standards", dark_bg=dark)
+    kicker_header(s, "Benchmarks", "Engagement Benchmarks",
+                  "Performance metrics vs. industry standards", dark_bg=dark)
     def er_status(val):
         try:
             v = float(str(val).replace("%",""))
             return "Strong" if v>=3 else ("Average" if v>=1 else "Low")
         except: return "—"
     branded_table(s, ["Platform","Key Metric","Value","Benchmark","Status"], [
-        ["Instagram","Engagement Rate",   ig_raw.get("engagement_rate","N/A"),">3% is good",        er_status(ig_raw.get("engagement_rate","0"))],
-        ["Instagram","Reels Engagement",  ig_raw.get("engagement_rate_reels","N/A"), ">3% is good",  er_status(ig_raw.get("engagement_rate_reels","0"))],
-        ["Instagram","Posting Frequency", ig_raw.get("posting_frequency","N/A"),   "3-5 / week",     "—"],
-        ["Facebook", "Page Followers",    fb_raw.get("followers","N/A"),      "Varies by industry", "—"],
-        ["YouTube",  "Subscribers",       yt_raw.get("subscribers","N/A"),    "Varies by niche",    "—"],
-        ["YouTube",  "Views / Video",     vpv_str, ">1,000 is good", "—"],
-        ["LinkedIn", "Followers",         li_raw.get("followers","N/A"),      "Varies by industry", "—"],
+        ["Instagram","Engagement Rate",   ig_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(ig_raw.get("engagement_rate","0"))],
+        ["Instagram","Reels Engagement",  ig_raw.get("engagement_rate_reels","N/A"), ">3% is good",        er_status(ig_raw.get("engagement_rate_reels","0"))],
+        ["Instagram","Posting Frequency", ig_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
+        ["Facebook", "Page Followers",    fb_raw.get("followers","N/A"),             "Varies by industry", "—"],
+        ["YouTube",  "Subscribers",       yt_raw.get("subscribers","N/A"),           "Varies by niche",    "—"],
+        ["YouTube",  "Views / Video",     vpv_str,                                   ">1,000 is good",     "—"],
+        ["LinkedIn", "Followers",         li_raw.get("followers","N/A"),             "Varies by industry", "—"],
     ], 0.55, 1.65, 12.23, 4.90, dark_bg=dark)
     footer_bar(s, 15, dark_bg=dark)
 
     # ── SLIDE 16: Strengths & Gaps (light) ────────────────────
     s, dark = start_slide(prs, blank, 16)
-    kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps", "What's working, and what needs attention", dark_bg=dark)
-    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform", cp.get("strongest_platform","N/A"), dark_bg=dark)
-    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work", cp.get("weakest_platform","N/A"), dark_bg=dark)
-    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
-    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity", cp.get("growth_opportunity","N/A"), dark_bg=dark)
-    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary", analysis.get("overall_summary","N/A"), dark_bg=dark)
+    kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps",
+                  "What's working, and what needs attention", dark_bg=dark)
+    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",   cp.get("strongest_platform","N/A"),  dark_bg=dark)
+    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work",      cp.get("weakest_platform","N/A"),    dark_bg=dark)
+    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency",  cp.get("content_consistency","N/A"), dark_bg=dark)
+    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",   cp.get("growth_opportunity","N/A"),  dark_bg=dark)
+    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",     analysis.get("overall_summary","N/A"), dark_bg=dark)
     footer_bar(s, 16, dark_bg=dark)
 
     # ── SLIDE 17: Recommendations (dark) ──────────────────────
     s, dark = start_slide(prs, blank, 17)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
-    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65, size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
-    tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35, size=13, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
+    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65,
+       size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
+    tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35,
+       size=13, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
     card(s, 0.55, 1.70, 5.96, 1.30, "Instagram", ig.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 6.83, 1.70, 5.96, 1.30, "YouTube", yt.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 0.55, 3.30, 5.96, 1.30, "Facebook", fb.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 6.83, 3.30, 5.96, 1.30, "LinkedIn", li.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 6.83, 1.70, 5.96, 1.30, "YouTube",   yt.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 0.55, 3.30, 5.96, 1.30, "Facebook",  fb.get("recommendation","N/A"), dark_bg=dark)
+    card(s, 6.83, 3.30, 5.96, 1.30, "LinkedIn",  li.get("recommendation","N/A"), dark_bg=dark)
     card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=dark)
-    tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Claude AI",
+    tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Apify + Claude AI",
        0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
     footer_bar(s, 17, dark_bg=dark)
 
@@ -1230,8 +1298,8 @@ def generate():
         yt_raw   = fetch_youtube(handles.get("youtube",""))     if handles.get("youtube")   else {}
 
         domain_for_brand = website_url.replace("https://","").replace("http://","").rstrip("/")
-        brand_for_search  = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain_for_brand).replace("www.","")
-        li_raw   = fetch_linkedin(handles.get("linkedin",""), brand_for_search) if handles.get("linkedin")  else {}
+        brand_for_search = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain_for_brand).replace("www.","")
+        li_raw   = fetch_linkedin(handles.get("linkedin",""), brand_for_search) if handles.get("linkedin") else {}
 
         analysis = analyse_with_claude(website_url, handles, ig_raw, fb_raw, yt_raw, li_raw)
         ppt_path, safe_name = create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url)
@@ -1259,27 +1327,21 @@ def download(safe_name):
 
 @app.route("/debug_instagram/<username>")
 def debug_instagram(username):
-    """
-    TEMPORARY diagnostic route.
-    Visit this directly in Chrome to see the raw SearchAPI.io response
-    for one Instagram account — no Railway logs, no terminal needed.
-    Example: /debug_instagram/sportico_resorts
-    """
     try:
         r = requests.get(
             "https://www.searchapi.io/api/v1/search",
             params={"engine": "instagram_profile", "username": username,
                     "api_key": SEARCHAPI_KEY}
         )
-        data = r.json()
+        data  = r.json()
         posts = data.get("posts", [])
         return jsonify({
-            "status_code": r.status_code,
+            "status_code":          r.status_code,
             "total_posts_returned": len(posts),
-            "search_metadata": data.get("search_metadata", {}),
-            "profile_keys": list(data.get("profile", {}).keys()),
-            "first_post_full": posts[0] if posts else "no posts found",
-            "second_post_full": posts[1] if len(posts) > 1 else "n/a",
+            "search_metadata":      data.get("search_metadata", {}),
+            "profile_keys":         list(data.get("profile", {}).keys()),
+            "first_post_full":      posts[0] if posts else "no posts found",
+            "second_post_full":     posts[1] if len(posts) > 1 else "n/a",
         })
     except Exception as e:
         return jsonify({"error": str(e)})
