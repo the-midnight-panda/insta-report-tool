@@ -321,7 +321,6 @@ def _to_timestamp(val):
     return None
 
 def _post_permalink(post, username):
-    # Apify uses 'url', SearchAPI uses 'link' and 'permalink'
     link = _get_first(post, ["url","permalink","link","post_url"])
     if link and link.startswith("http"):
         return link
@@ -331,8 +330,6 @@ def _post_permalink(post, username):
     return "N/A"
 
 def _classify_post(post):
-    # Apify: "Image", "Video", "Sidecar"
-    # SearchAPI: "image", "video", "reel", "carousel", "sidecar"
     t = str(_get_first(post, ["type","productType","product_type"], "")).lower()
     if "video" in t or "reel" in t or "clip" in t:
         return "reels"
@@ -397,43 +394,119 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
     return result
 
 
+def fetch_apify_async(username):
+    """
+    Async Apify: start run, poll until done, fetch dataset.
+    Used when sync endpoint returns 201 with no data.
+    """
+    try:
+        print(f"   🔄 Apify async: starting run for @{username}...")
+        start_r = requests.post(
+            "https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs",
+            params={"token": APIFY_API_KEY},
+            json={
+                "username":      [username],
+                "resultsLimit":  30,
+                "addParentData": False,
+            },
+            timeout=30
+        )
+        if start_r.status_code not in (200, 201):
+            print(f"   ⚠️ Apify async start failed: {start_r.status_code}")
+            return []
+
+        run_data = start_r.json().get("data", {})
+        run_id   = run_data.get("id")
+        if not run_id:
+            print("   ⚠️ Apify async: no run ID returned")
+            return []
+
+        print(f"   ⏳ Apify run started: {run_id} — polling...")
+
+        # Poll until SUCCEEDED (max 2 minutes, check every 5s)
+        last_status_r = None
+        for attempt in range(24):
+            time.sleep(5)
+            last_status_r = requests.get(
+                f"https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs/{run_id}",
+                params={"token": APIFY_API_KEY},
+                timeout=15
+            )
+            status = last_status_r.json().get("data", {}).get("status", "")
+            print(f"   ⏳ Apify status: {status} (attempt {attempt+1})")
+            if status == "SUCCEEDED":
+                break
+            elif status in ("FAILED", "ABORTED", "TIMED-OUT"):
+                print(f"   ⚠️ Apify run ended with: {status}")
+                return []
+
+        if last_status_r is None:
+            return []
+
+        dataset_id = last_status_r.json().get("data", {}).get("defaultDatasetId")
+        if not dataset_id:
+            print("   ⚠️ Apify async: no dataset ID")
+            return []
+
+        items_r = requests.get(
+            f"https://api.apify.com/v2/datasets/{dataset_id}/items",
+            params={"token": APIFY_API_KEY, "limit": 30},
+            timeout=30
+        )
+        posts = items_r.json()
+        if isinstance(posts, list) and len(posts) > 0:
+            print(f"   ✅ Apify async returned {len(posts)} posts")
+            return posts
+        else:
+            print("   ⚠️ Apify async dataset was empty")
+            return []
+
+    except Exception as e:
+        print(f"   ⚠️ Apify async error: {e}")
+        return []
+
+
 def fetch_instagram_posts_via_apify(username):
     """
-    Fetch last 30 posts from Apify Instagram Post Scraper.
-    Falls back to empty list if Apify key missing or call fails.
+    Fetch last 30 posts via Apify Instagram Post Scraper.
+    Tries sync first, falls back to async polling if needed.
     """
     if not APIFY_API_KEY:
-        print("   ⚠️ No APIFY_API_KEY — cannot fetch 30 posts")
+        print("   ⚠️ No APIFY_API_KEY set")
         return []
     try:
-        print(f"   🔄 Apify: fetching 30 posts for @{username} (may take 60-90s)...")
+        print(f"   🔄 Apify sync: fetching 30 posts for @{username} (60–90s)...")
         r = requests.post(
             "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items",
             params={"token": APIFY_API_KEY, "timeout": 120},
             json={
-                "username":       [username],
-                "resultsLimit":   30,
-                "addParentData":  False,
+                "username":      [username],
+                "resultsLimit":  30,
+                "addParentData": False,
             },
             timeout=150
         )
-        if r.status_code == 200:
+        if r.status_code in (200, 201):
             posts = r.json()
-            print(f"   ✅ Apify returned {len(posts)} posts")
-            return posts
+            if isinstance(posts, list) and len(posts) > 0:
+                print(f"   ✅ Apify sync returned {len(posts)} posts")
+                return posts
+            else:
+                print(f"   ⚠️ Apify sync status {r.status_code} — no posts yet, trying async...")
+                return fetch_apify_async(username)
         else:
-            print(f"   ⚠️ Apify returned status {r.status_code}")
-            return []
+            print(f"   ⚠️ Apify sync status {r.status_code}, trying async...")
+            return fetch_apify_async(username)
     except Exception as e:
-        print(f"   ⚠️ Apify error: {e}")
-        return []
+        print(f"   ⚠️ Apify sync error: {e}, trying async...")
+        return fetch_apify_async(username)
 
 
 def fetch_instagram(username):
     print(f"📸 Fetching Instagram: @{username}")
     data = {}
     try:
-        # ── Profile data from SearchAPI (followers, bio, etc.) ────────
+        # ── Profile data from SearchAPI ───────────────────────────────
         r = requests.get(
             "https://www.searchapi.io/api/v1/search",
             params={"engine":"instagram_profile","username":username,
@@ -458,7 +531,7 @@ def fetch_instagram(username):
         except:
             followers_n = 0
 
-        # ── 30 posts from Apify, fallback to SearchAPI's 12 ──────────
+        # ── 30 posts via Apify, fallback to SearchAPI 12 ─────────────
         apify_posts = fetch_instagram_posts_via_apify(username)
         if apify_posts:
             posts_raw = apify_posts
@@ -471,8 +544,8 @@ def fetch_instagram(username):
         print(f"   🔍 Source: {source} | First post keys: {list(posts_raw[0].keys())[:12] if posts_raw else 'none'}")
 
         # ── Parse every post ──────────────────────────────────────────
-        parsed  = []
-        img_c   = car_c = vid_c = 0
+        parsed = []
+        img_c  = car_c = vid_c = 0
 
         for post in posts_raw:
             if source == "apify":
@@ -484,7 +557,7 @@ def fetch_instagram(username):
                 url      = _get_first(post, ["url","permalink","link"]) or "N/A"
                 ts       = _to_timestamp(_get_first(post, ["timestamp","iso_date"]))
             else:
-                # SearchAPI field names (confirmed from debug route)
+                # SearchAPI confirmed field names from debug route
                 likes    = post.get("likes", 0) or 0
                 comments = post.get("comments", 0) or 0
                 shares   = _get_first(post, ["share_count","shares","reshare_count"])
@@ -494,7 +567,7 @@ def fetch_instagram(username):
                 ts       = _to_timestamp(_get_first(post, ["iso_date","timestamp","taken_at","created_at"]))
 
             ptype = _classify_post(post)
-            if ptype == "images":     img_c += 1
+            if ptype == "images":      img_c += 1
             elif ptype == "carousels": car_c += 1
             else:                      vid_c += 1
 
@@ -563,7 +636,8 @@ def fetch_instagram(username):
             "carousels": carousels_metrics,
             "reels":     reels_metrics,
         }
-        print(f"   ✅ {followers} followers | {post_count} posts ({img_c} img / {car_c} carousel / {vid_c} reels) | ER: {eng_rate}")
+        print(f"   ✅ {followers} followers | {post_count} posts "
+              f"({img_c} img / {car_c} carousel / {vid_c} reels) | ER: {eng_rate}")
     except Exception as e:
         import traceback
         print(f"   ⚠️ Instagram failed: {e}")
@@ -1245,11 +1319,11 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     s, dark = start_slide(prs, blank, 16)
     kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps",
                   "What's working, and what needs attention", dark_bg=dark)
-    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",   cp.get("strongest_platform","N/A"),  dark_bg=dark)
-    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work",      cp.get("weakest_platform","N/A"),    dark_bg=dark)
-    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency",  cp.get("content_consistency","N/A"), dark_bg=dark)
-    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",   cp.get("growth_opportunity","N/A"),  dark_bg=dark)
-    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",     analysis.get("overall_summary","N/A"), dark_bg=dark)
+    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",  cp.get("strongest_platform","N/A"),  dark_bg=dark)
+    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work",     cp.get("weakest_platform","N/A"),    dark_bg=dark)
+    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
+    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",  cp.get("growth_opportunity","N/A"),  dark_bg=dark)
+    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",    analysis.get("overall_summary","N/A"), dark_bg=dark)
     footer_bar(s, 16, dark_bg=dark)
 
     # ── SLIDE 17: Recommendations (dark) ──────────────────────
