@@ -5,7 +5,8 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from collections import Counter
 from dotenv import load_dotenv
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -300,6 +301,18 @@ def _get_first(d, keys, default=None):
     return default
 
 def _to_timestamp(val):
+    """
+    Convert various timestamp formats to a unix timestamp (epoch seconds).
+
+    IMPORTANT — timezone handling:
+    Instagram / Apify / SearchAPI all report post dates in UTC. The trailing
+    "Z" on strings like "2026-04-01T13:30:41.000Z" means "Zulu time", i.e. UTC.
+    We explicitly attach UTC tzinfo for naive date strings instead of letting
+    Python guess based on wherever the server happens to be running — otherwise
+    the exact same post produces a different timestamp on a Mac in IST vs a
+    Railway server, which silently throws off posting frequency, day-of-week
+    calculations, and the pinned-post date-sort below.
+    """
     if val is None:
         return None
     try:
@@ -308,12 +321,22 @@ def _to_timestamp(val):
         s = str(val)
         if s.isdigit():
             return float(s)
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
-                    "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S",
+
+        # Formats that already carry explicit timezone/offset info
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+            try:
+                dt = datetime.strptime(s[:32], fmt)
+                return dt.timestamp()
+            except:
+                continue
+
+        # Formats with NO timezone marker — Instagram data here is always UTC
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
                     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
                 clean = s[:26].rstrip("Z")
-                return datetime.strptime(clean, fmt.rstrip("Z").rstrip("%z")).timestamp()
+                dt = datetime.strptime(clean, fmt)
+                return dt.replace(tzinfo=timezone.utc).timestamp()
             except:
                 continue
     except:
@@ -330,6 +353,37 @@ def _classify_post(post):
     if post.get("_source") == "reel_scraper":
         return "reels"
     return "images"
+
+def compute_day_distribution(parsed):
+    """
+    Works out which day of the week the brand posts most/least on,
+    based on each post's real UTC date (not Instagram's pinned-post
+    display order, and not local server time).
+
+    Returns most_active_day and least_active_day. If a weekday never
+    appears in the sample, it's reported as "never posted" rather than
+    just being called the least-active day, since that's more accurate
+    than implying it *did* happen, just rarely.
+    """
+    day_names = ["Monday","Tuesday","Wednesday","Thursday",
+                 "Friday","Saturday","Sunday"]
+    counts = Counter()
+    for p in parsed:
+        if p["ts"]:
+            weekday = datetime.fromtimestamp(p["ts"], tz=timezone.utc).strftime("%A")
+            counts[weekday] += 1
+
+    if not counts:
+        return {"most_active_day": "N/A", "least_active_day": "N/A"}
+
+    most_active_day = max(counts, key=counts.get)
+    zero_days = [d for d in day_names if d not in counts]
+    if zero_days:
+        least_active_day = f"{zero_days[0]} (never posted)"
+    else:
+        least_active_day = min(counts, key=counts.get)
+
+    return {"most_active_day": most_active_day, "least_active_day": least_active_day}
 
 def _score(p):
     return p["likes"] + p["comments"] + (p["shares"] or 0) + (p["reposts"] or 0)
@@ -436,7 +490,7 @@ def fetch_apify_async(username, actor_id, input_json):
 
         items_r = requests.get(
             f"https://api.apify.com/v2/datasets/{dataset_id}/items",
-            params={"token": APIFY_API_KEY, "limit": 30},
+            params={"token": APIFY_API_KEY, "limit": 35},
             timeout=30
         )
         posts = items_r.json()
@@ -457,7 +511,16 @@ def fetch_instagram_posts_via_apify(username):
     Two-scraper approach:
     1. apify/instagram-post-scraper  → images + carousels (likes, comments, views)
     2. apify/instagram-reel-scraper  → reels (likes, comments, views, SHARES)
-    Merged and capped at 30 posts total.
+
+    NOTE on the 35-post fetch limit (up from 30):
+    Instagram displays pinned posts first in profile grid order, regardless of
+    when they were actually posted — a post pinned 3 months ago can occupy a
+    "top 30" slot and silently push out a genuinely recent post. We fetch a
+    small buffer of extra posts here (35 instead of 30) so that, after the
+    real-date sort applied later in fetch_instagram(), there's always enough
+    genuinely recent posts to fill a true top-30 even when a few pinned posts
+    turn out to be old. We intentionally do NOT slice down to 30 here — the
+    final trim happens after sorting by real post date, not fetch order.
     """
     if not APIFY_API_KEY:
         print("   ⚠️ No APIFY_API_KEY set")
@@ -470,7 +533,7 @@ def fetch_instagram_posts_via_apify(username):
         print(f"   🔄 Apify posts: fetching for @{username}...")
         post_input = {
             "username":      [username],
-            "resultsLimit":  30,
+            "resultsLimit":  35,
             "addParentData": False,
         }
         r = requests.post(
@@ -500,7 +563,7 @@ def fetch_instagram_posts_via_apify(username):
         print(f"   🔄 Apify reels: fetching reels with shares for @{username}...")
         reel_input = {
             "username":     [username],
-            "resultsLimit": 30,
+            "resultsLimit": 35,
         }
         r2 = requests.post(
             "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/run-sync-get-dataset-items",
@@ -537,8 +600,8 @@ def fetch_instagram_posts_via_apify(username):
     except Exception as e:
         print(f"   ⚠️ Reel scraper error: {e}")
 
-    print(f"   ✅ Total combined posts: {len(all_posts)}")
-    return all_posts[:30]
+    print(f"   ✅ Total combined posts fetched (pre date-sort): {len(all_posts)}")
+    return all_posts
 
 
 def fetch_instagram(username):
@@ -570,7 +633,7 @@ def fetch_instagram(username):
         except:
             followers_n = 0
 
-        # ── 30 posts via Apify (post + reel scrapers), fallback to SearchAPI ──
+        # ── Posts via Apify (post + reel scrapers), fallback to SearchAPI ──
         apify_posts = fetch_instagram_posts_via_apify(username)
         if apify_posts:
             posts_raw = apify_posts
@@ -580,11 +643,10 @@ def fetch_instagram(username):
             source    = "searchapi"
             print(f"   ↩️  Using SearchAPI posts ({len(posts_raw)} posts)")
 
-        print(f"   🔍 Source: {source} | Posts: {len(posts_raw)}")
+        print(f"   🔍 Source: {source} | Posts fetched: {len(posts_raw)}")
 
         # ── Parse every post ──────────────────────────────────────────
         parsed = []
-        img_c  = car_c = vid_c = 0
 
         for post in posts_raw:
             if source == "apify":
@@ -613,9 +675,6 @@ def fetch_instagram(username):
                 ts       = _to_timestamp(_get_first(post, ["iso_date","timestamp","taken_at","created_at"]))
 
             ptype = _classify_post(post)
-            if ptype == "images":      img_c += 1
-            elif ptype == "carousels": car_c += 1
-            else:                      vid_c += 1
 
             parsed.append({
                 "type":    ptype,
@@ -628,29 +687,55 @@ def fetch_instagram(username):
                 "ts":      ts,
             })
 
+        # ── Sort by REAL post date, ignoring Instagram's pinned-post
+        #    display order, and keep only the true most-recent 30.
+        #
+        #    Why: Instagram shows pinned posts first in the grid no matter
+        #    how old they are. If we trusted fetch/display order, an old
+        #    pinned post could occupy a "top 30" slot and quietly displace
+        #    a genuinely recent post — skewing posting frequency, averages,
+        #    and which post gets crowned Top/Worst performer. A pinned post
+        #    that IS genuinely recent is unaffected by this — it earns its
+        #    place in the top 30 purely by having a recent real date, same
+        #    as any other post. Pin status itself is never checked. ───────
+        posts_with_dates    = [pp for pp in parsed if pp["ts"] is not None]
+        posts_without_dates = [pp for pp in parsed if pp["ts"] is None]
+        posts_with_dates.sort(key=lambda pp: pp["ts"], reverse=True)
+        parsed = (posts_with_dates + posts_without_dates)[:30]
+
+        # ── Content-type counts — computed AFTER the date-sort/trim above,
+        #    so the Content Strategy pie chart reflects the true final 30
+        #    posts, not the larger raw fetch batch. ───────────────────────
+        img_c = sum(1 for pp in parsed if pp["type"] == "images")
+        car_c = sum(1 for pp in parsed if pp["type"] == "carousels")
+        vid_c = sum(1 for pp in parsed if pp["type"] == "reels")
+
         post_count      = len(parsed)
-        images_group    = [p for p in parsed if p["type"] == "images"]
-        carousels_group = [p for p in parsed if p["type"] == "carousels"]
-        reels_group     = [p for p in parsed if p["type"] == "reels"]
+        images_group    = [pp for pp in parsed if pp["type"] == "images"]
+        carousels_group = [pp for pp in parsed if pp["type"] == "carousels"]
+        reels_group     = [pp for pp in parsed if pp["type"] == "reels"]
 
         # ── Overall engagement ────────────────────────────────────────
-        total_l          = sum(p["likes"] for p in parsed)
-        total_c          = sum(p["comments"] for p in parsed)
+        total_l          = sum(pp["likes"] for pp in parsed)
+        total_c          = sum(pp["comments"] for pp in parsed)
         engagement_total = total_l + total_c
         eng_rate         = f"{(engagement_total/post_count/followers_n*100):.2f}%" if (post_count and followers_n) else "N/A"
 
-        reel_l = sum(p["likes"]    for p in reels_group)
-        reel_c = sum(p["comments"] for p in reels_group)
+        reel_l = sum(pp["likes"]    for pp in reels_group)
+        reel_c = sum(pp["comments"] for pp in reels_group)
         eng_rate_reels = (f"{(reel_l+reel_c)/len(reels_group)/followers_n*100:.2f}%"
                           if (reels_group and followers_n) else "N/A")
 
         # ── Posting frequency ─────────────────────────────────────────
-        timestamps = [p["ts"] for p in parsed if p["ts"]]
+        timestamps = [pp["ts"] for pp in parsed if pp["ts"]]
         if len(timestamps) >= 2:
             span_days         = max((max(timestamps) - min(timestamps)) / 86400, 1)
             posting_frequency = f"{(post_count / span_days * 7):.1f} / week"
         else:
             posting_frequency = "N/A"
+
+        # ── Day-of-week posting distribution (UTC) ──────────────────────
+        day_dist = compute_day_distribution(parsed)
 
         # ── Per-group metrics ─────────────────────────────────────────
         images_metrics    = _compute_group_metrics(images_group,    followers_n)
@@ -673,6 +758,9 @@ def fetch_instagram(username):
             "engagement_total":      engagement_total,
             "posting_frequency":     posting_frequency,
 
+            "most_active_day":  day_dist["most_active_day"],
+            "least_active_day": day_dist["least_active_day"],
+
             "img_count":  img_c,
             "car_count":  car_c,
             "vid_count":  vid_c,
@@ -683,7 +771,8 @@ def fetch_instagram(username):
             "reels":     reels_metrics,
         }
         print(f"   ✅ {followers} followers | {post_count} posts "
-              f"({img_c} img / {car_c} carousel / {vid_c} reels) | ER: {eng_rate}")
+              f"({img_c} img / {car_c} carousel / {vid_c} reels) | ER: {eng_rate} | "
+              f"Most active: {day_dist['most_active_day']} | Least active: {day_dist['least_active_day']}")
     except Exception as e:
         import traceback
         print(f"   ⚠️ Instagram failed: {e}")
@@ -1147,6 +1236,8 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 4.73, 3.10, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate (Reels Only)", size=32, dark_bg=dark)
     stat_block(s, 8.92, 3.10, 3.86, ig_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
     card(s, 0.55, 4.75, 12.23, 1.75, "Instagram Analysis", analysis.get("instagram_analysis",""), dark_bg=dark)
+    tb(s, f"Most Active Day: {ig_raw.get('most_active_day','N/A')}   ·   Least Active Day: {ig_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
+       0.55, 6.60, 12.23, 0.35, size=11.5, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
     footer_bar(s, 3, dark_bg=dark)
 
     # ── SLIDE 4: Instagram Content Strategy (light) ───────────
