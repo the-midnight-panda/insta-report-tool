@@ -8,7 +8,6 @@ import io
 import time
 from datetime import datetime, timezone
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -22,7 +21,6 @@ load_dotenv()
 SEARCHAPI_KEY     = os.getenv("SEARCHAPI_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 APIFY_API_KEY     = os.getenv("APIFY_API_KEY")
-SCRAPERAPI_KEY    = os.getenv("SCRAPERAPI_KEY")
 
 app = Flask(__name__)
 
@@ -624,74 +622,77 @@ def fetch_apify_async(username, actor_id, input_json):
         return []
 
 
-def fetch_repost_count_via_scraperapi(post_url):
+def fetch_post_metrics_via_analytics_actor(post_urls):
     """
-    Fetches a single Instagram post's real public page via ScraperAPI (with
-    JS rendering on) and reads off the repost count. Unlike shares — which
-    Instagram keeps owner-only forever — reposts show a real public number
-    right next to likes/comments; we confirmed this by hand on both mobile
-    and desktop web views.
+    Enriches posts with shares / reposts / saves using the Apify actor
+    'patient_discovery/instagram-reel-analytics-by-url'.
 
-    IMPORTANT CAVEAT: Instagram embeds this number inside JSON blobs in
-    <script> tags rather than plain visible text, and the exact field name
-    isn't publicly documented and can change without notice. This function
-    tries the most likely field names first. If Instagram changes their
-    markup, this is the function to re-test and adjust — same debugging
-    process used earlier to confirm shares vs. reposts behaviour. Run one
-    real post through this and print `html` to verify/adjust the pattern
-    list below before trusting it at scale.
-    """
-    if not SCRAPERAPI_KEY or not post_url or post_url == "N/A":
-        return None
-    try:
-        r = requests.get(
-            "https://api.scraperapi.com/",
-            params={"api_key": SCRAPERAPI_KEY, "url": post_url, "render": "true"},
-            timeout=60
-        )
-        if r.status_code != 200:
-            return None
-        html = r.text
-        for pattern in [
-            r'"reshare_count"\s*:\s*(\d+)',
-            r'"repost_count"\s*:\s*(\d+)',
-            r'"reshareCount"\s*:\s*(\d+)',
-            r'"repostCount"\s*:\s*(\d+)',
-        ]:
-            m = re.search(pattern, html)
-            if m:
-                return int(m.group(1))
-        return None
-    except Exception as e:
-        print(f"   ⚠️ ScraperAPI repost fetch failed for {post_url}: {e}")
-        return None
+    Why this specific actor: after testing 6 different tools (SearchAPI,
+    two official Apify scrapers, ScraperAPI, SocialCrawl, anonymous
+    GraphQL), this was the ONLY one that returned real values. Verified
+    against a live TalkingLands post on 2026-07-15:
+        metrics.repost_count = 17   (matched browser exactly)
+        metrics.share_count  = 750
+        metrics.save_count   = 410
+    Instagram only exposes these numbers to logged-in viewers; this actor
+    handles that on its side, so no Instagram credentials are needed here.
 
+    Takes a list of post URLs (supports bulk input), returns a dict of
+    {url: {"shares": int|None, "reposts": int|None, "saves": int|None}}.
+    Cost: one Apify result per post (~$2.30-2.70 per 1,000 → roughly
+    ₹6-7 extra per 30-post report).
+    """
+    if not APIFY_API_KEY:
+        print("   ⚠️ No APIFY_API_KEY set — skipping shares/reposts enrichment")
+        return {}
 
-def fetch_repost_counts_batch(posts, max_workers=8):
-    """
-    Fetches repost counts for many posts in PARALLEL via ScraperAPI rather
-    than one at a time — doing 30 sequential full-page renders could take
-    several minutes and risk timing out the report request. 8 concurrent
-    workers is a reasonable balance between speed and not hammering
-    ScraperAPI's rate limits; adjust based on your ScraperAPI plan.
-    """
-    if not SCRAPERAPI_KEY:
-        print("   ⚠️ No SCRAPERAPI_KEY set — skipping repost enrichment")
+    urls = [u for u in post_urls if u and u != "N/A"]
+    if not urls:
         return {}
 
     results = {}
-    urls = [p["url"] for p in posts if p.get("url") and p["url"] != "N/A"]
-    print(f"   🔄 Fetching repost counts for {len(urls)} posts via ScraperAPI...")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(fetch_repost_count_via_scraperapi, u): u for u in urls}
-        for future in as_completed(future_to_url):
-            url = future_to_url[future]
-            try:
-                results[url] = future.result()
-            except Exception:
-                results[url] = None
-    found = sum(1 for v in results.values() if v is not None)
-    print(f"   ✅ Repost counts found for {found}/{len(urls)} posts")
+    try:
+        print(f"   🔄 Fetching shares/reposts/saves for {len(urls)} posts via analytics actor...")
+        actor_input = {"urls": urls}
+        r = requests.post(
+            "https://api.apify.com/v2/acts/patient_discovery~instagram-reel-analytics-by-url/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 180},
+            json=actor_input,
+            timeout=200
+        )
+        items = []
+        if r.status_code in (200, 201):
+            items = r.json()
+            if not isinstance(items, list):
+                items = []
+        if not items:
+            print(f"   ⚠️ Analytics actor sync empty/failed (status {r.status_code}), trying async...")
+            items = fetch_apify_async("bulk", "patient_discovery~instagram-reel-analytics-by-url", actor_input)
+
+        for item in items:
+            metrics = item.get("metrics", {}) or {}
+            # Match result back to its post URL: the actor echoes the input
+            # URL and also provides the shortcode in `code`.
+            item_url = _get_first(item, ["inputUrl", "url"]) or ""
+            code     = item.get("code", "")
+            key = None
+            for u in urls:
+                if (item_url and item_url.rstrip("/") == u.rstrip("/")) or (code and f"/{code}" in u):
+                    key = u
+                    break
+            if key is None:
+                continue
+            results[key] = {
+                "shares":  metrics.get("share_count"),
+                "reposts": metrics.get("repost_count"),
+                "saves":   metrics.get("save_count"),
+            }
+
+        found = sum(1 for v in results.values() if v.get("reposts") is not None or v.get("shares") is not None)
+        print(f"   ✅ Shares/reposts found for {found}/{len(urls)} posts")
+    except Exception as e:
+        print(f"   ⚠️ Analytics actor error: {e}")
+
     return results
 
 
@@ -893,18 +894,25 @@ def fetch_instagram(username):
         posts_with_dates.sort(key=lambda pp: pp["ts"], reverse=True)
         parsed = (posts_with_dates + posts_without_dates)[:30]
 
-        # ── Fill in missing repost counts via ScraperAPI ─────────────────
-        #    Only used as a fallback for posts where Apify/SearchAPI didn't
-        #    already provide a repost count — real Apify data always wins
-        #    when present, ScraperAPI just fills the remaining gaps.
-        missing_repost_posts = [pp for pp in parsed if pp["reposts"] is None]
-        if missing_repost_posts and SCRAPERAPI_KEY:
-            repost_results = fetch_repost_counts_batch(missing_repost_posts)
+        # ── Enrich with shares / reposts / saves via the analytics actor ──
+        #    Runs on the final 30 posts only (after the date-sort/trim), so
+        #    we never pay for posts that won't appear in the report. Values
+        #    already present from the base scrapers are kept; the actor
+        #    fills the gaps.
+        posts_needing = [pp for pp in parsed
+                         if pp["reposts"] is None or pp["shares"] is None]
+        if posts_needing and APIFY_API_KEY:
+            metric_results = fetch_post_metrics_via_analytics_actor(
+                [pp["url"] for pp in posts_needing]
+            )
             for pp in parsed:
-                if pp["reposts"] is None:
-                    found = repost_results.get(pp["url"])
-                    if found is not None:
-                        pp["reposts"] = found
+                found = metric_results.get(pp["url"])
+                if not found:
+                    continue
+                if pp["reposts"] is None and found.get("reposts") is not None:
+                    pp["reposts"] = int(found["reposts"])
+                if pp["shares"] is None and found.get("shares") is not None:
+                    pp["shares"] = int(found["shares"])
 
         # ── Content-type counts — computed AFTER the date-sort/trim above,
         #    so the Content Strategy pie chart reflects the true final 30
@@ -1791,29 +1799,16 @@ def download(safe_name):
 
 @app.route("/debug_repost")
 def debug_repost():
+    """Quick test of the analytics actor for one post URL — returns the
+    shares/reposts/saves it found, for verifying the enrichment source."""
     post_url = request.args.get("url", "")
     if not post_url:
         return jsonify({"error": "Pass a post URL like ?url=https://www.instagram.com/p/XXXX/"})
-    if not SCRAPERAPI_KEY:
-        return jsonify({"error": "SCRAPERAPI_KEY not set"})
-    try:
-        r = requests.get(
-            "https://api.scraperapi.com/",
-            params={"api_key": SCRAPERAPI_KEY, "url": post_url, "render": "true"},
-            timeout=60
-        )
-        html = r.text
-        looks_like_login_wall = any(kw in html[:3000] for kw in ["Log in", "login_form", "Log In"])
-        count_fields = sorted(set(re.findall(r'"[a-zA-Z_]{2,30}[Cc]ount"\s*:\s*-?\d+', html)))
-        return jsonify({
-            "status_code":           r.status_code,
-            "html_length":           len(html),
-            "html_snippet":          html[:500],
-            "looks_like_login_wall": looks_like_login_wall,
-            "every_count_field_found": count_fields,
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    results = fetch_post_metrics_via_analytics_actor([post_url])
+    return jsonify({
+        "requested_url": post_url,
+        "metrics_found": results.get(post_url) or results,
+    })
 
 @app.route("/debug_instagram/<username>")
 def debug_instagram(username):
