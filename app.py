@@ -1808,6 +1808,7 @@ def debug_repost():
         return jsonify({
             "status_code":           r.status_code,
             "html_length":           len(html),
+            "html_snippet":          html[:500],
             "looks_like_login_wall": looks_like_login_wall,
             "every_count_field_found": count_fields,
         })
