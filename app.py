@@ -1789,6 +1789,31 @@ def download(safe_name):
     return send_file(path, as_attachment=True,
                      download_name=f"{safe_name}_social_report.pptx")
 
+@app.route("/debug_repost")
+def debug_repost():
+    post_url = request.args.get("url", "")
+    if not post_url:
+        return jsonify({"error": "Pass a post URL like ?url=https://www.instagram.com/p/XXXX/"})
+    if not SCRAPERAPI_KEY:
+        return jsonify({"error": "SCRAPERAPI_KEY not set"})
+    try:
+        r = requests.get(
+            "https://api.scraperapi.com/",
+            params={"api_key": SCRAPERAPI_KEY, "url": post_url, "render": "true"},
+            timeout=60
+        )
+        html = r.text
+        looks_like_login_wall = any(kw in html[:3000] for kw in ["Log in", "login_form", "Log In"])
+        count_fields = sorted(set(re.findall(r'"[a-zA-Z_]{2,30}[Cc]ount"\s*:\s*-?\d+', html)))
+        return jsonify({
+            "status_code":           r.status_code,
+            "html_length":           len(html),
+            "looks_like_login_wall": looks_like_login_wall,
+            "every_count_field_found": count_fields,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/debug_instagram/<username>")
 def debug_instagram(username):
     try:
