@@ -4,9 +4,11 @@ import anthropic
 import json
 import os
 import re
+import io
 import time
 from datetime import datetime, timezone
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -20,6 +22,7 @@ load_dotenv()
 SEARCHAPI_KEY     = os.getenv("SEARCHAPI_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 APIFY_API_KEY     = os.getenv("APIFY_API_KEY")
+SCRAPERAPI_KEY    = os.getenv("SCRAPERAPI_KEY")
 
 app = Flask(__name__)
 
@@ -40,6 +43,8 @@ TEXT_GRAY      = RGBColor(0x66, 0x66, 0x66)
 TEXT_GRAY_LT   = RGBColor(0xD0, 0xCF, 0xC9)
 TEXT_FOOTER    = RGBColor(0x99, 0x99, 0x99)
 PIE_TAN        = RGBColor(0xD9, 0xC4, 0xA0)
+MOMENTUM_UP    = RGBColor(0x6F, 0xA8, 0x6B)
+MOMENTUM_DOWN  = RGBColor(0xC1, 0x6E, 0x6E)
 
 FONT_MONO      = "DM Mono"
 FONT_MONO_MED  = "DM Mono Medium"
@@ -388,6 +393,119 @@ def compute_day_distribution(parsed):
 def _score(p):
     return p["likes"] + p["comments"] + (p["shares"] or 0) + (p["reposts"] or 0)
 
+
+def compute_hour_insights(parsed, min_posts_to_qualify=2, outlier_multiplier=3):
+    """
+    Most Frequent Hour: which hour of day (UTC) has the most posts — pure count,
+    doesn't consider engagement at all.
+
+    Best Performing Hour: which hour has the highest AVERAGE engagement. Only
+    hours with `min_posts_to_qualify` or more posts are allowed to compete —
+    this stops a single lucky post from falsely looking like a repeatable
+    "best time to post."
+
+    Outlier note: separately, checks every hour that has exactly ONE post
+    (too few to qualify above) and flags it if that single post scored
+    dramatically higher than the sample's overall average (>= outlier_multiplier
+    times the average). This keeps the standout post visible to the client
+    without mislabeling it as a proven pattern.
+    """
+    hour_posts = {}
+    for p in parsed:
+        if p["ts"] is not None:
+            hour = datetime.fromtimestamp(p["ts"], tz=timezone.utc).hour
+            hour_posts.setdefault(hour, []).append(p)
+
+    if not hour_posts:
+        return {"most_frequent_hour": "N/A", "best_performing_hour": "N/A", "outlier_note": None}
+
+    def hour_avg(posts):
+        return sum(_score(pp) for pp in posts) / len(posts)
+
+    # ── Most Frequent Hour — pure count ──────────────────────────────
+    most_frequent_hour = max(hour_posts, key=lambda h: len(hour_posts[h]))
+
+    # ── Best Performing Hour — avg engagement, min posts to qualify ──
+    qualifying = {h: posts for h, posts in hour_posts.items() if len(posts) >= min_posts_to_qualify}
+    if qualifying:
+        best_hour = max(qualifying, key=lambda h: hour_avg(qualifying[h]))
+        best_performing_hour = f"{best_hour:02d}:00 UTC"
+    else:
+        best_performing_hour = "N/A (not enough data)"
+
+    # ── Outlier note — single-post hours only ────────────────────────
+    all_scores  = [_score(pp) for pp in parsed]
+    overall_avg = sum(all_scores) / len(all_scores) if all_scores else 0
+    outlier_note = None
+    lonely_hours = {h: posts[0] for h, posts in hour_posts.items() if len(posts) == 1}
+    if lonely_hours and overall_avg > 0:
+        lonely_hour, lonely_post = max(lonely_hours.items(), key=lambda kv: _score(kv[1]))
+        lonely_score = _score(lonely_post)
+        if lonely_score >= overall_avg * outlier_multiplier:
+            outlier_note = (f"Outlier: one post at {lonely_hour:02d}:00 UTC scored {lonely_score:,} "
+                             f"vs. an average of {overall_avg:.0f} — worth reviewing, though it's "
+                             f"just one post so far.")
+
+    return {
+        "most_frequent_hour":   f"{most_frequent_hour:02d}:00 UTC",
+        "best_performing_hour": best_performing_hour,
+        "outlier_note":         outlier_note,
+    }
+
+
+def compute_posting_consistency(parsed):
+    """
+    Looks at the real gap (in days) between every consecutive pair of posts
+    and measures how much those gaps vary, using the coefficient of variation
+    (std deviation ÷ average gap). A low value means posts land at fairly
+    even intervals ("Consistent"); a high value means bursts of activity
+    followed by long silences ("Irregular") — something a single flat
+    "X per week" number hides completely.
+    """
+    timestamps = sorted(p["ts"] for p in parsed if p["ts"] is not None)
+    if len(timestamps) < 3:
+        return "N/A"
+
+    gaps = [(timestamps[i+1] - timestamps[i]) / 86400 for i in range(len(timestamps)-1)]
+    avg_gap = sum(gaps) / len(gaps)
+    if avg_gap == 0:
+        return "N/A"
+    variance = sum((g - avg_gap) ** 2 for g in gaps) / len(gaps)
+    coefficient_of_variation = (variance ** 0.5) / avg_gap
+
+    return "Consistent" if coefficient_of_variation < 0.75 else "Irregular"
+
+
+def compute_momentum(parsed):
+    """
+    Splits posts into two halves by real date — the most recent half vs.
+    the older half — and compares average engagement between them. Returns
+    a signed percentage plus a direction ("up"/"down") so the report can
+    show a colored arrow: green ▲ if recent posts are outperforming older
+    ones, red ▼ if engagement is slipping.
+    """
+    dated = sorted((p for p in parsed if p["ts"] is not None), key=lambda p: p["ts"], reverse=True)
+    n = len(dated)
+    if n < 10:
+        return {"momentum_pct": "N/A", "momentum_direction": None}
+
+    half = n // 2
+    recent_half = dated[:half]
+    older_half  = dated[half:half*2] if len(dated) >= half*2 else dated[half:]
+    if not older_half:
+        return {"momentum_pct": "N/A", "momentum_direction": None}
+
+    recent_avg = sum(_score(p) for p in recent_half) / len(recent_half)
+    older_avg  = sum(_score(p) for p in older_half) / len(older_half)
+    if older_avg == 0:
+        return {"momentum_pct": "N/A", "momentum_direction": None}
+
+    pct_change = (recent_avg - older_avg) / older_avg * 100
+    return {
+        "momentum_pct":       f"{pct_change:+.0f}%",
+        "momentum_direction": "up" if pct_change >= 0 else "down",
+    }
+
 def _compute_group_metrics(posts_group, followers, is_reels=False):
     n = len(posts_group)
     if n == 0:
@@ -504,6 +622,77 @@ def fetch_apify_async(username, actor_id, input_json):
     except Exception as e:
         print(f"   ⚠️ Apify async error: {e}")
         return []
+
+
+def fetch_repost_count_via_scraperapi(post_url):
+    """
+    Fetches a single Instagram post's real public page via ScraperAPI (with
+    JS rendering on) and reads off the repost count. Unlike shares — which
+    Instagram keeps owner-only forever — reposts show a real public number
+    right next to likes/comments; we confirmed this by hand on both mobile
+    and desktop web views.
+
+    IMPORTANT CAVEAT: Instagram embeds this number inside JSON blobs in
+    <script> tags rather than plain visible text, and the exact field name
+    isn't publicly documented and can change without notice. This function
+    tries the most likely field names first. If Instagram changes their
+    markup, this is the function to re-test and adjust — same debugging
+    process used earlier to confirm shares vs. reposts behaviour. Run one
+    real post through this and print `html` to verify/adjust the pattern
+    list below before trusting it at scale.
+    """
+    if not SCRAPERAPI_KEY or not post_url or post_url == "N/A":
+        return None
+    try:
+        r = requests.get(
+            "https://api.scraperapi.com/",
+            params={"api_key": SCRAPERAPI_KEY, "url": post_url, "render": "true"},
+            timeout=60
+        )
+        if r.status_code != 200:
+            return None
+        html = r.text
+        for pattern in [
+            r'"reshare_count"\s*:\s*(\d+)',
+            r'"repost_count"\s*:\s*(\d+)',
+            r'"reshareCount"\s*:\s*(\d+)',
+            r'"repostCount"\s*:\s*(\d+)',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                return int(m.group(1))
+        return None
+    except Exception as e:
+        print(f"   ⚠️ ScraperAPI repost fetch failed for {post_url}: {e}")
+        return None
+
+
+def fetch_repost_counts_batch(posts, max_workers=8):
+    """
+    Fetches repost counts for many posts in PARALLEL via ScraperAPI rather
+    than one at a time — doing 30 sequential full-page renders could take
+    several minutes and risk timing out the report request. 8 concurrent
+    workers is a reasonable balance between speed and not hammering
+    ScraperAPI's rate limits; adjust based on your ScraperAPI plan.
+    """
+    if not SCRAPERAPI_KEY:
+        print("   ⚠️ No SCRAPERAPI_KEY set — skipping repost enrichment")
+        return {}
+
+    results = {}
+    urls = [p["url"] for p in posts if p.get("url") and p["url"] != "N/A"]
+    print(f"   🔄 Fetching repost counts for {len(urls)} posts via ScraperAPI...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {executor.submit(fetch_repost_count_via_scraperapi, u): u for u in urls}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                results[url] = future.result()
+            except Exception:
+                results[url] = None
+    found = sum(1 for v in results.values() if v is not None)
+    print(f"   ✅ Repost counts found for {found}/{len(urls)} posts")
+    return results
 
 
 def fetch_instagram_posts_via_apify(username):
@@ -627,6 +816,7 @@ def fetch_instagram(username):
         full_name   = p.get("full_name", "")
         is_verified = p.get("is_verified", False)
         is_business = p.get("is_business", False)
+        avatar_url  = _get_first(p, ["avatar_hd", "avatar"])
 
         try:
             followers_n = int(str(followers).replace(",",""))
@@ -703,6 +893,19 @@ def fetch_instagram(username):
         posts_with_dates.sort(key=lambda pp: pp["ts"], reverse=True)
         parsed = (posts_with_dates + posts_without_dates)[:30]
 
+        # ── Fill in missing repost counts via ScraperAPI ─────────────────
+        #    Only used as a fallback for posts where Apify/SearchAPI didn't
+        #    already provide a repost count — real Apify data always wins
+        #    when present, ScraperAPI just fills the remaining gaps.
+        missing_repost_posts = [pp for pp in parsed if pp["reposts"] is None]
+        if missing_repost_posts and SCRAPERAPI_KEY:
+            repost_results = fetch_repost_counts_batch(missing_repost_posts)
+            for pp in parsed:
+                if pp["reposts"] is None:
+                    found = repost_results.get(pp["url"])
+                    if found is not None:
+                        pp["reposts"] = found
+
         # ── Content-type counts — computed AFTER the date-sort/trim above,
         #    so the Content Strategy pie chart reflects the true final 30
         #    posts, not the larger raw fetch batch. ───────────────────────
@@ -737,6 +940,11 @@ def fetch_instagram(username):
         # ── Day-of-week posting distribution (UTC) ──────────────────────
         day_dist = compute_day_distribution(parsed)
 
+        # ── Best/most-frequent posting hour, consistency, momentum (UTC) ──
+        hour_insights = compute_hour_insights(parsed)
+        consistency   = compute_posting_consistency(parsed)
+        momentum      = compute_momentum(parsed)
+
         # ── Per-group metrics ─────────────────────────────────────────
         images_metrics    = _compute_group_metrics(images_group,    followers_n)
         carousels_metrics = _compute_group_metrics(carousels_group, followers_n)
@@ -760,6 +968,15 @@ def fetch_instagram(username):
 
             "most_active_day":  day_dist["most_active_day"],
             "least_active_day": day_dist["least_active_day"],
+
+            "avatar_url": avatar_url,
+
+            "most_frequent_hour":   hour_insights["most_frequent_hour"],
+            "best_performing_hour": hour_insights["best_performing_hour"],
+            "outlier_note":         hour_insights["outlier_note"],
+            "posting_consistency":  consistency,
+            "momentum_pct":         momentum["momentum_pct"],
+            "momentum_direction":   momentum["momentum_direction"],
 
             "img_count":  img_c,
             "car_count":  car_c,
@@ -1235,9 +1452,45 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 3.10, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
     stat_block(s, 4.73, 3.10, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate (Reels Only)", size=32, dark_bg=dark)
     stat_block(s, 8.92, 3.10, 3.86, ig_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
-    card(s, 0.55, 4.75, 12.23, 1.75, "Instagram Analysis", analysis.get("instagram_analysis",""), dark_bg=dark)
+
+    # ── Row 3 (NEW): hour insights, consistency, momentum — kept as
+    #    compact text lines rather than giant gold numbers, so 4 more
+    #    stats don't visually overwhelm an already busy slide. ────────
+    sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
+    tb(s, f"Most Frequent Hour: {ig_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {ig_raw.get('best_performing_hour','N/A')}",
+       0.55, 4.25, 12.23, 0.28, size=12, color=sub_color, font=FONT_MONO_LT)
+    tb(s, f"Posting Consistency: {ig_raw.get('posting_consistency','N/A')}",
+       0.55, 4.55, 5.95, 0.28, size=12, color=sub_color, font=FONT_MONO_LT)
+
+    momentum_direction = ig_raw.get("momentum_direction")
+    momentum_pct       = ig_raw.get("momentum_pct", "N/A")
+    if momentum_direction == "up":
+        momentum_color, momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {momentum_pct}"
+    elif momentum_direction == "down":
+        momentum_color, momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {momentum_pct}"
+    else:
+        momentum_color, momentum_text = sub_color,      f"Momentum: {momentum_pct}"
+    tb(s, momentum_text, 6.60, 4.55, 5.65, 0.28, size=12, bold=True, color=momentum_color, font=FONT_MONO_MED)
+
+    # ── Profile photo — placed below all the metric rows above ───────
+    avatar_url = ig_raw.get("avatar_url")
+    if avatar_url:
+        try:
+            img_resp = requests.get(avatar_url, timeout=15)
+            if img_resp.status_code == 200:
+                s.shapes.add_picture(io.BytesIO(img_resp.content), Inches(0.55), Inches(4.95), height=Inches(1.45))
+        except Exception as e:
+            print(f"   ⚠️ Could not load profile avatar image: {e}")
+
+    card(s, 2.20, 4.95, 10.58, 1.45, "Instagram Analysis", analysis.get("instagram_analysis",""), dark_bg=dark)
+
     tb(s, f"Most Active Day: {ig_raw.get('most_active_day','N/A')}   ·   Least Active Day: {ig_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
-       0.55, 6.60, 12.23, 0.35, size=11.5, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
+       0.55, 6.50, 12.23, 0.28, size=11, color=sub_color, font=FONT_MONO_LT)
+
+    outlier_note = ig_raw.get("outlier_note")
+    if outlier_note:
+        tb(s, outlier_note, 0.55, 6.80, 12.23, 0.28, size=11, color=GOLD, font=FONT_MONO_LT)
+
     footer_bar(s, 3, dark_bg=dark)
 
     # ── SLIDE 4: Instagram Content Strategy (light) ───────────
