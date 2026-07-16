@@ -506,6 +506,27 @@ def compute_momentum(parsed):
         "momentum_direction": "up" if pct_change >= 0 else "down",
     }
 
+def parse_num(val):
+    """
+    Module-level numeric parser for follower counts etc. — handles
+    values like "233,374", "1.2M", "45K", "1000+".
+
+    NOTE: create_ppt also defines its own local parse_num (identical
+    logic); that local copy harmlessly shadows this one inside
+    create_ppt. This module-level version exists because
+    fetch_linkedin needs it too, and previously calling it there
+    raised a silent NameError (the local one wasn't visible outside
+    create_ppt), which wiped out all LinkedIn post-level metrics.
+    """
+    try:
+        v = str(val).replace(",","").upper().replace("+","")
+        if "M" in v: return float(v.replace("M","")) * 1_000_000
+        if "K" in v: return float(v.replace("K","")) * 1_000
+        return float(v)
+    except:
+        return 0
+
+
 def _smart_round(value, max_decimals=2):
     """
     Rounds to a whole number normally (e.g. 4.2 -> "4"), but if that
