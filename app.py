@@ -842,21 +842,31 @@ def fetch_facebook_posts_via_apify(page_handle):
 def _classify_facebook_post(post):
     """
     Facebook doesn't have a Carousel format like Instagram, so posts are
-    split into Photos / Videos / Links instead. Field name is a guess
-    (see caveat on fetch_facebook_posts_via_apify) — checked via a wide
-    fallback list, same defensive pattern as the Instagram classifier.
+    split into Photos / Videos / Links instead.
+
+    CONFIRMED against real apify/facebook-posts-scraper output (2026-07-16):
+    there is no top-level "type" field on a post. The real signal lives
+    inside the "media" array — each media item has a "__typename" field
+    ("Photo" for images; expected "Video" for actual video/reel posts,
+    unconfirmed against a real video post yet). This replaced an earlier
+    guess that checked for a top-level type field, which doesn't exist
+    and was silently classifying every post as "photos".
     """
-    t = str(_get_first(post, ["type", "postType", "media_type", "mediaType"], "")).lower()
-    if "video" in t or "reel" in t:
+    media_items = post.get("media") or []
+    typenames = [str(m.get("__typename","")).lower() for m in media_items if isinstance(m, dict)]
+    if any("video" in t for t in typenames):
         return "videos"
-    elif "link" in t or "share" in t:
-        return "links"
-    elif "photo" in t or "image" in t or "album" in t:
+    if any("photo" in t or "image" in t for t in typenames):
         return "photos"
-    # Fallback: if a video URL exists on the post, treat it as a video;
-    # otherwise assume photo, since that's the most common Facebook post type.
-    if _get_first(post, ["videoUrl", "video_url"]):
+    # No media at all, or an unrecognized shape — check the caption as a
+    # last resort (posts often say "reel" or "video" somewhere in their
+    # own text, e.g. "In this reel, we break down..."), then fall back
+    # to "links" for pure text/link posts.
+    text = str(post.get("text","")).lower()
+    if "reel" in text or "video" in text:
         return "videos"
+    if not media_items:
+        return "links"
     return "photos"
 
 
