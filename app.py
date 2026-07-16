@@ -26,7 +26,7 @@ APIFY_API_KEY     = os.getenv("APIFY_API_KEY")
 
 app = Flask(__name__)
 
-TOTAL_SLIDES = 19
+TOTAL_SLIDES = 26
 
 # ═══════════════════════════════════════════════════════════════
 # MIDNIGHT PANDA BRAND DESIGN TOKENS
@@ -1278,6 +1278,84 @@ def fetch_youtube(channel_id):
     return data
 
 
+def fetch_linkedin_posts_via_apify(company_handle):
+    """
+    Fetches recent LinkedIn company posts using
+    data-slayer/linkedin-company-posts-scraper. Same honest caveat as
+    the Facebook integration: field names are a best-effort guess based
+    on the actor's public documentation, not yet verified against real
+    output. Use /debug_linkedin to confirm/adjust before trusting at scale.
+    """
+    if not APIFY_API_KEY:
+        print("   ⚠️ No APIFY_API_KEY set")
+        return []
+
+    company_url = company_handle if company_handle.startswith("http") else f"https://www.linkedin.com/company/{company_handle}"
+    li_input = {
+        "startUrls": [{"url": company_url}],
+        "resultsLimit": 35,
+    }
+    try:
+        print(f"   🔄 Apify LinkedIn posts: fetching for {company_handle}...")
+        r = requests.post(
+            "https://api.apify.com/v2/acts/data-slayer~linkedin-company-posts-scraper/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 120},
+            json=li_input,
+            timeout=150
+        )
+        if r.status_code in (200, 201):
+            posts = r.json()
+            if isinstance(posts, list) and len(posts) > 0:
+                print(f"   ✅ LinkedIn post scraper returned {len(posts)} posts")
+                return posts
+        print(f"   ⚠️ LinkedIn post scraper sync empty/failed (status {r.status_code}), trying async...")
+        return fetch_apify_async(company_handle, "data-slayer~linkedin-company-posts-scraper", li_input)
+    except Exception as e:
+        print(f"   ⚠️ LinkedIn post scraper error: {e}")
+        return []
+
+
+def _classify_linkedin_post(post):
+    """
+    7 categories (Reposted Content deliberately excluded — a reposted
+    video is just classified as a video, based on its actual attached
+    format): Videos / Multi-Image / Single-Image / Documents / Polls /
+    Text-Only / Other (Articles, Newsletters, Celebrations combined).
+
+    If a post is a pure repost with no attachments of its own, we look
+    at the shared_post's attachments instead, since that's the real
+    content being shown.
+    """
+    attachments = post.get("attachments") or []
+    if not attachments and post.get("is_repost") and isinstance(post.get("shared_post"), dict):
+        attachments = post["shared_post"].get("attachments") or []
+
+    types = [str(a.get("type","")).lower() for a in attachments if isinstance(a, dict)]
+
+    if any("video" in t for t in types):
+        return "videos"
+    if any("document" in t or "pdf" in t for t in types):
+        return "documents"
+    image_count = sum(1 for t in types if "image" in t or "photo" in t)
+    if image_count >= 2:
+        return "multi_image"
+    if image_count == 1:
+        return "single_image"
+    if post.get("poll") or _get_first(post, ["poll_options","pollOptions"]):
+        return "polls"
+
+    text = str(post.get("text","") or post.get("commentary","")).lower()
+    if not attachments and not text:
+        return "text_only"
+    if "linkedin.com/pulse" in text or _get_first(post, ["article_url","articleUrl"]):
+        return "other"          # Article
+    if any(k in text for k in ["newsletter", "subscribe to our"]):
+        return "other"          # Newsletter
+    if not attachments:
+        return "text_only"
+    return "other"               # Celebrations / anything unrecognized
+
+
 def fetch_linkedin(company_handle, brand_name=None):
     print(f"💼 Fetching LinkedIn: {company_handle}")
     company_name = company_handle.replace("-"," ").replace("_"," ")
@@ -1370,10 +1448,88 @@ def fetch_linkedin(company_handle, brand_name=None):
 
             if data["followers"] != "N/A":
                 print(f"   ✅ LinkedIn final: {data['followers']} followers")
-                return data
+                break  # stop trying more search queries, but still fall through
+                       # to the post-level fetch below — a plain 'return' here
+                       # would have skipped it entirely
 
         except Exception as e:
             print(f"   ⚠️ LinkedIn query failed: {e}")
+
+    # ── Posts via Apify — reuses the exact same metric machinery as
+    #    Facebook (day distribution, hour insights, consistency,
+    #    momentum, per-category group metrics). ─────────────────────
+    try:
+        followers_n = parse_num(data.get("followers", 0))
+        posts_raw = fetch_linkedin_posts_via_apify(company_handle)
+        print(f"   🔍 LinkedIn posts fetched: {len(posts_raw)}")
+
+        parsed = []
+        for post in posts_raw:
+            likes    = _get_first(post, ["likes", "reactions", "likesCount", "reactionsCount"], 0) or 0
+            comments = _get_first(post, ["comments", "commentsCount"], 0) or 0
+            shares   = _get_first(post, ["shares", "reposts", "sharesCount", "repostsCount"])
+            url      = _get_first(post, ["url", "postUrl", "linkedinUrl", "link"]) or "N/A"
+            ts       = _to_timestamp(_get_first(post, ["time", "timestamp", "date", "publishedAt", "postedAt"]))
+            ptype    = _classify_linkedin_post(post)
+            try: likes = int(likes)
+            except: likes = 0
+            try: comments = int(comments)
+            except: comments = 0
+            parsed.append({
+                "type": ptype, "likes": likes, "comments": comments,
+                "shares": (int(shares) if shares is not None else None),
+                "reposts": None, "views": None, "url": url, "ts": ts,
+            })
+
+        posts_with_dates    = [pp for pp in parsed if pp["ts"] is not None]
+        posts_without_dates = [pp for pp in parsed if pp["ts"] is None]
+        posts_with_dates.sort(key=lambda pp: pp["ts"], reverse=True)
+        parsed = (posts_with_dates + posts_without_dates)[:30]
+
+        post_count = len(parsed)
+        li_categories = {}
+        for cat in ["videos", "multi_image", "single_image", "documents", "polls", "text_only", "other"]:
+            group = [pp for pp in parsed if pp["type"] == cat]
+            li_categories[cat] = _compute_group_metrics(group, followers_n)
+            li_categories[cat]["n"] = len(group)
+
+        total_l = sum(pp["likes"] for pp in parsed)
+        total_c = sum(pp["comments"] for pp in parsed)
+        engagement_total = total_l + total_c
+        eng_rate = f"{(engagement_total/post_count/followers_n*100):.2f}%" if (post_count and followers_n) else "N/A"
+
+        timestamps = [pp["ts"] for pp in parsed if pp["ts"]]
+        if len(timestamps) >= 2:
+            span_days = max((max(timestamps) - min(timestamps)) / 86400, 1)
+            posting_frequency = f"{(post_count / span_days * 7):.1f} / week"
+        else:
+            posting_frequency = "N/A"
+
+        day_dist      = compute_day_distribution(parsed)
+        hour_insights = compute_hour_insights(parsed)
+        consistency   = compute_posting_consistency(parsed)
+        momentum      = compute_momentum(parsed)
+
+        data.update({
+            "sample_size":       post_count,
+            "engagement_rate":   eng_rate,
+            "engagement_total":  engagement_total,
+            "posting_frequency": posting_frequency,
+            "most_active_day":  day_dist["most_active_day"],
+            "least_active_day": day_dist["least_active_day"],
+            "most_frequent_hour":   hour_insights["most_frequent_hour"],
+            "best_performing_hour": hour_insights["best_performing_hour"],
+            "outlier_note":         hour_insights["outlier_note"],
+            "posting_consistency":  consistency,
+            "momentum_pct":         momentum["momentum_pct"],
+            "momentum_direction":   momentum["momentum_direction"],
+            "categories": li_categories,
+        })
+        print(f"   ✅ {post_count} posts across 7 categories | ER: {eng_rate}")
+    except Exception as e:
+        import traceback
+        print(f"   ⚠️ LinkedIn post-level fetch failed: {e}")
+        print(traceback.format_exc())
 
     return data
 
@@ -1421,6 +1577,15 @@ engagement vs overall engagement, and comment on Facebook's posting_frequency vs
 3-5 posts/week best practice. If Facebook's sample_size is 0 or very low, say so plainly
 instead of inventing benchmarks from missing data.
 
+For the "linkedin_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
+characters total) using the SAME benchmark bands as above, applied to the LINKEDIN
+DATA's engagement_rate field. LinkedIn's "categories" object breaks posts into videos,
+multi_image, single_image, documents, polls, text_only, and other — mention whichever
+category has the most posts or the highest engagement as the account's strongest
+content format. Comment on posting_frequency vs LinkedIn's B2B best practice of
+2-3 posts/week. If sample_size is 0 or very low, say so plainly instead of inventing
+benchmarks from missing data.
+
 Return ONLY a JSON object:
 {{
   "brand_name": "brand name",
@@ -1456,6 +1621,7 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
+  "linkedin_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
   "cross_platform": {{
     "strongest_platform": "which platform performs best and why",
     "weakest_platform": "which needs most work and why",
@@ -1620,6 +1786,41 @@ def link_list_card(slide, x, y, w, h, label, items, dark_bg=False):
             run2.text = "N/A"
             run2.font.color.rgb = body_color
         run2.font.size = Pt(11.5); run2.font.name = FONT_MONO
+
+def linkedin_performance_slide(prs, blank, slide_num, category_label, category_data, sample_size):
+    """
+    One shared layout for all 7 LinkedIn content-type performance
+    slides (Videos, Multi-Image, Single-Image, Documents, Polls,
+    Text-Only, Other) — same visual structure as Facebook's Photos
+    Performance slide, just parameterized per category so the 7 nearly
+    identical slides don't need 7 copies of the same ~15 lines.
+    """
+    s, dark = start_slide(prs, blank, slide_num)
+    n = category_data.get("n", 0)
+    kicker_header(s, f"LinkedIn — {category_label}", f"{category_label} Performance",
+                  f"Based on {n} {category_label.lower()} post{'s' if n != 1 else ''} from the last {sample_size}",
+                  dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, category_data.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, category_data.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, category_data.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
+    stat_block(s, 0.55, 3.10, 3.86, category_data.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.10, 3.86, category_data.get("avg_shares","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.10, 3.86, n, "Posts in Category", size=32, dark_bg=dark)
+
+    if n > 0:
+        card_url(s, 0.55, 4.75, 5.95, 1.75,
+                 f"Top-Performing {category_label} (score {category_data.get('top_score','N/A')})",
+                 category_data.get("top_url","N/A"), dark_bg=dark)
+        card_url(s, 6.65, 4.75, 5.80, 1.75,
+                 f"Lowest-Performing {category_label} (score {category_data.get('worst_score','N/A')})",
+                 category_data.get("worst_url","N/A"), dark_bg=dark)
+    else:
+        card(s, 0.55, 4.75, 12.23, 1.75, "No Posts in This Category",
+             f"No {category_label.lower()} posts appeared in the sample of LinkedIn posts analyzed for this report.",
+             dark_bg=dark)
+
+    footer_bar(s, slide_num, dark_bg=dark)
+
 
 def branded_table(slide, headers, rows, x, y, w, h, dark_bg=False):
     cols = len(headers)
@@ -2029,34 +2230,108 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 6.75, 3.60, 5.70, 2.35, "Recommendation", yt.get("recommendation","N/A"), dark_bg=dark)
     footer_bar(s, 13, dark_bg=dark)
 
-    # ── SLIDE 14: LinkedIn (light) ──────────────────────────────
+    # ── SLIDE 14: LinkedIn Overview (light) ─────────────────────
+    li_categories = li_raw.get("categories", {})
     s, dark = start_slide(prs, blank, 14)
-    kicker_header(s, "LinkedIn", "LinkedIn Company Page",
-                  f"linkedin.com/company/{handles.get('linkedin','N/A')}", dark_bg=dark)
+    kicker_header(s, "LinkedIn", "LinkedIn Overview",
+                  f"{handles.get('linkedin','N/A')}  ·  Based on last {li_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+
     stat_block(s, 0.55, 1.75, 3.86, li_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, li_raw.get("employees","N/A"), "Employees", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, "LinkedIn", "Platform", size=54, dark_bg=dark)
-    card(s, 0.55, 3.25, 12.23, 1.15, "Company Summary", li.get("summary","N/A"), dark_bg=dark)
-    card(s, 0.55, 4.75, 5.95, 1.80, "Strength", li.get("strength","N/A"), dark_bg=dark)
-    card(s, 6.65, 4.75, 5.80, 1.80, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, li_raw.get("sample_size","N/A"), "Posts Analyzed", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, li_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
+    stat_block(s, 0.55, 3.15, 3.86, li_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.15, 3.86, li_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.15, 3.86, li_raw.get("employees","N/A"), "Employees", size=32, dark_bg=dark)
+
+    li_divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+    ln14 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
+    ln14.fill.solid(); ln14.fill.fore_color.rgb = li_divider_color; ln14.line.fill.background()
+
+    li_sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
+    tb(s, f"Most Frequent Hour: {li_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {li_raw.get('best_performing_hour','N/A')}",
+       0.55, 4.24, 12.23, 0.24, size=12, color=li_sub_color, font=FONT_MONO_LT)
+    tb(s, f"Posting Consistency: {li_raw.get('posting_consistency','N/A')}",
+       0.55, 4.50, 5.95, 0.24, size=12, color=li_sub_color, font=FONT_MONO_LT)
+
+    li_momentum_direction = li_raw.get("momentum_direction")
+    li_momentum_pct       = li_raw.get("momentum_pct", "N/A")
+    if li_momentum_direction == "up":
+        li_momentum_color, li_momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {li_momentum_pct}"
+    elif li_momentum_direction == "down":
+        li_momentum_color, li_momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {li_momentum_pct}"
+    else:
+        li_momentum_color, li_momentum_text = li_sub_color,   f"Momentum: {li_momentum_pct}"
+    tb(s, li_momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=li_momentum_color, font=FONT_MONO_MED)
+
+    li_analysis_text = truncate_to_sentence(analysis.get("linkedin_analysis",""), max_chars=480)
+    card(s, 0.55, 4.86, 12.23, 1.55, "LinkedIn Analysis", li_analysis_text, dark_bg=dark)
+
+    tb(s, f"Most Active Day: {li_raw.get('most_active_day','N/A')}   ·   Least Active Day: {li_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
+       0.55, 6.50, 12.23, 0.22, size=11, color=li_sub_color, font=FONT_MONO_LT)
+
+    li_outlier_note = li_raw.get("outlier_note")
+    if li_outlier_note:
+        tb(s, li_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
+
     footer_bar(s, 14, dark_bg=dark)
 
-    # ── SLIDE 15: LinkedIn Strategic Analysis (dark) ──────────
+    # ── SLIDE 15: LinkedIn Content Strategy — 7-category pie ────
     s, dark = start_slide(prs, blank, 15)
-    kicker_header(s, "LinkedIn", "Strategic Analysis", "Professional presence and B2B opportunities", dark_bg=dark)
-    branded_table(s, ["Metric","Value","Insight"], [
-        ["Followers",     li_raw.get("followers","N/A"), "Professional audience size"],
-        ["Employees",     li_raw.get("employees","N/A"), "Company scale indicator"],
-        ["Content Focus", "B2B & Professional",          "Key content strategy"],
-        ["Best Post Type","Articles & Updates",           "Highest LinkedIn engagement"],
-        ["Posting Freq.", "2–3x per week",                "LinkedIn best practice"],
-    ], 0.55, 1.65, 12.23, 2.85, dark_bg=dark)
-    card(s, 0.55, 4.85, 5.95, 1.65, "Strength", li.get("strength","N/A"), dark_bg=dark)
-    card(s, 6.65, 4.85, 5.80, 1.65, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
+    kicker_header(s, "LinkedIn", "Content Strategy",
+                  f"Content mix from the last {li_raw.get('sample_size',30)} posts", dark_bg=dark)
+
+    li_cat_order = [
+        ("videos",       "Videos"),
+        ("multi_image",  "Multi-Image"),
+        ("single_image", "Single-Image"),
+        ("documents",    "Documents"),
+        ("polls",        "Polls"),
+        ("text_only",    "Text-Only"),
+        ("other",        "Other"),
+    ]
+    li_counts = [li_categories.get(key, {}).get("n", 0) for key, _ in li_cat_order]
+    li_total  = max(sum(li_counts), 1)
+
+    li_cd = ChartData()
+    li_cd.categories = [label for _, label in li_cat_order]
+    li_cd.add_series("Posts", tuple(li_counts))
+    li_chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.55),Inches(1.85),Inches(5.90),Inches(4.60),li_cd).chart
+    li_chart.has_legend = True
+    li_chart.legend.font.size = Pt(9)
+    LINKEDIN_PIE_COLORS = [
+        GOLD, RGBColor(0x8B,0x6F,0x47), CARD_DARK if not dark else RGBColor(0x3A,0x3A,0x3A),
+        PIE_TAN, RGBColor(0x6B,0x59,0x40), RGBColor(0xA8,0xA2,0x96), RGBColor(0x4A,0x38,0x26),
+    ]
+    for i, col in enumerate(LINKEDIN_PIE_COLORS):
+        pt = li_chart.plots[0].series[0].points[i]
+        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
+
+    # Compact 7-row list, right of the pie — a full stat_block per
+    # category (like Instagram's 3-slice version) wouldn't fit 7 rows
+    # cleanly, so this uses smaller text rows instead.
+    li_list_y = 1.95
+    for key, label in li_cat_order:
+        cnt = li_categories.get(key, {}).get("n", 0)
+        pct = int(round(cnt / li_total * 100))
+        tb(s, f"{label}", 6.70, li_list_y, 3.20, 0.30, size=13, bold=True,
+           color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_MONO_MED)
+        tb(s, f"{pct}%  —  {cnt} post{'s' if cnt != 1 else ''}", 10.00, li_list_y, 2.78, 0.30,
+           size=13, color=GOLD, font=FONT_MONO_MED)
+        li_list_y += 0.44
+
     footer_bar(s, 15, dark_bg=dark)
 
-    # ── SLIDE 16: Cross-Platform Comparison (light) ───────────
-    s, dark = start_slide(prs, blank, 16)
+    # ── SLIDES 16-22: LinkedIn Performance — one per content type ──
+    li_sample_size = li_raw.get("sample_size", 30)
+    for i, (key, label) in enumerate(li_cat_order):
+        linkedin_performance_slide(
+            prs, blank, 16 + i, label,
+            li_categories.get(key, {"n": 0}),
+            li_sample_size
+        )
+
+    # ── SLIDE 23: Cross-Platform Comparison (dark) ──────────────
+    s, dark = start_slide(prs, blank, 23)
     kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=dark)
     ig_f = parse_num(ig_raw.get("followers",0)); fb_f = parse_num(fb_raw.get("followers",0))
     yt_f = parse_num(yt_raw.get("subscribers",0)); li_f = parse_num(li_raw.get("followers",0))
@@ -2080,10 +2355,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ("LinkedIn",  li_raw.get("followers","N/A")),
     ]):
         stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=dark)
-    footer_bar(s, 16, dark_bg=dark)
+    footer_bar(s, 23, dark_bg=dark)
 
-    # ── SLIDE 17: Engagement Benchmarks (dark) ────────────────
-    s, dark = start_slide(prs, blank, 17)
+    # ── SLIDE 24: Engagement Benchmarks (light) ─────────────────
+    s, dark = start_slide(prs, blank, 24)
     kicker_header(s, "Benchmarks", "Engagement Benchmarks",
                   "Performance metrics vs. industry standards", dark_bg=dark)
     def er_status(val):
@@ -2099,12 +2374,13 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["Facebook", "Posting Frequency", fb_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
         ["YouTube",  "Subscribers",       yt_raw.get("subscribers","N/A"),           "Varies by niche",    "—"],
         ["YouTube",  "Views / Video",     vpv_str,                                   ">1,000 is good",     "—"],
-        ["LinkedIn", "Followers",         li_raw.get("followers","N/A"),             "Varies by industry", "—"],
+        ["LinkedIn", "Engagement Rate",   li_raw.get("engagement_rate","N/A"),       ">2% is good (B2B)",  er_status(li_raw.get("engagement_rate","0"))],
+        ["LinkedIn", "Posting Frequency", li_raw.get("posting_frequency","N/A"),     "2–3 / week",         "—"],
     ], 0.55, 1.65, 12.23, 4.90, dark_bg=dark)
-    footer_bar(s, 17, dark_bg=dark)
+    footer_bar(s, 24, dark_bg=dark)
 
-    # ── SLIDE 18: Strengths & Gaps (light) ────────────────────
-    s, dark = start_slide(prs, blank, 18)
+    # ── SLIDE 25: Strengths & Gaps (dark) ───────────────────────
+    s, dark = start_slide(prs, blank, 25)
     kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps",
                   "What's working, and what needs attention", dark_bg=dark)
     card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",  cp.get("strongest_platform","N/A"),  dark_bg=dark)
@@ -2112,10 +2388,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
     card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",  cp.get("growth_opportunity","N/A"),  dark_bg=dark)
     card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",    analysis.get("overall_summary","N/A"), dark_bg=dark)
-    footer_bar(s, 18, dark_bg=dark)
+    footer_bar(s, 25, dark_bg=dark)
 
-    # ── SLIDE 19: Recommendations (dark) ──────────────────────
-    s, dark = start_slide(prs, blank, 19)
+    # ── SLIDE 26: Recommendations (light) ───────────────────────
+    s, dark = start_slide(prs, blank, 26)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
     tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65,
        size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
@@ -2128,7 +2404,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=dark)
     tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Apify + Claude AI",
        0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
-    footer_bar(s, 19, dark_bg=dark)
+    footer_bar(s, 26, dark_bg=dark)
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
@@ -2322,6 +2598,22 @@ def debug_repost():
         "requested_url": post_url,
         "metrics_found": results.get(post_url) or results,
     })
+
+@app.route("/debug_linkedin/<company_handle>")
+def debug_linkedin(company_handle):
+    """Run this once against a real LinkedIn company page to check the
+    raw Apify output — field names in fetch_linkedin_posts_via_apify /
+    _classify_linkedin_post are best-effort guesses and may need
+    adjusting once you see real data, same process used for Facebook."""
+    try:
+        posts = fetch_linkedin_posts_via_apify(company_handle)
+        return jsonify({
+            "total_posts_returned": len(posts),
+            "first_post_full":      posts[0] if posts else "no posts found",
+            "second_post_full":     posts[1] if len(posts) > 1 else "n/a",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/debug_facebook/<username>")
 def debug_facebook(username):
