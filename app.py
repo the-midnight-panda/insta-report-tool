@@ -1194,15 +1194,17 @@ YOUTUBE DATA:
 LINKEDIN DATA:
 {json.dumps(li, indent=2)}
 
-For the "instagram_analysis" field, write 3-4 sentences using these industry benchmark bands
-for Engagement Rate:
+For the "instagram_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
+characters total — this must fit in a fixed-size slide card, so be concise) using these
+industry benchmark bands for Engagement Rate:
 - Under 1% = Low engagement
 - 1% to 3.5% = Average / healthy
 - 3.5% to 6% = Good
 - 6%+ = Excellent
 Reference the account's engagement_rate against this scale, compare Reels engagement vs
 overall engagement, and comment on posting_frequency vs the general best-practice of
-3-5 posts per week. Be specific and use the real numbers, not generic statements.
+3-5 posts per week. Be specific and use the real numbers, but stay concise — no filler
+sentences, no repeated points.
 
 Return ONLY a JSON object:
 {{
@@ -1213,7 +1215,7 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
-  "instagram_analysis": "3-4 sentence written analysis as instructed above",
+  "instagram_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
   "facebook": {{
     "followers": "exact from data",
     "category": "exact from data",
@@ -1384,6 +1386,32 @@ def shorten_url(url, maxlen=42):
         return "N/A"
     return url if len(url) <= maxlen else url[:maxlen-1] + "…"
 
+def truncate_to_sentence(text, max_chars=480):
+    """
+    Hard safety net for card text: guarantees the string never exceeds
+    max_chars, regardless of how long Claude's generated text turns out
+    to be. Cuts at the last full sentence that fits (so it never ends
+    mid-word), falling back to a plain word-boundary cut only if no
+    sentence break exists anywhere within the limit. This is the actual
+    guarantee that text can never overflow a fixed-size slide card — the
+    prompt-level length instruction is just a soft, best-effort request
+    on top of this.
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    window = text[:max_chars]
+    best_cut = -1
+    for sep in [". ", "! ", "? "]:
+        cut = window.rfind(sep)
+        if cut > best_cut:
+            best_cut = cut
+    if best_cut > 0:
+        return window[:best_cut+1]
+    # No sentence break found anywhere in the window — cut at the last
+    # full word instead, so we at least never chop a word in half.
+    cut = window.rfind(" ")
+    return (window[:cut] if cut > 0 else window) + "…"
+
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 5 — BUILD 17-SLIDE MIDNIGHT PANDA BRANDED PPT
@@ -1454,21 +1482,29 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     s, dark = start_slide(prs, blank, 3)
     kicker_header(s, "Instagram", "Instagram Overview",
                   f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+
+    # ── Core metrics (unchanged) ──────────────────────────────────────
     stat_block(s, 0.55, 1.75, 3.86, ig_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("posts","N/A"), "Total Posts (all time)", size=54, dark_bg=dark)
     stat_block(s, 8.92, 1.75, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
-    stat_block(s, 0.55, 3.10, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate (Reels Only)", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.10, 3.86, ig_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
+    stat_block(s, 0.55, 3.15, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.15, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate (Reels Only)", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.15, 3.86, ig_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
 
-    # ── Row 3 (NEW): hour insights, consistency, momentum — kept as
-    #    compact text lines rather than giant gold numbers, so 4 more
-    #    stats don't visually overwhelm an already busy slide. ────────
+    # ── Thin divider — separates the core metrics above from the
+    #    posting-behavior insights below, for cleaner visual grouping ──
+    divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+    ln3 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
+    ln3.fill.solid(); ln3.fill.fore_color.rgb = divider_color; ln3.line.fill.background()
+
+    # ── Row 3: hour insights, consistency, momentum — compact text
+    #    lines rather than giant gold numbers, so these extra stats
+    #    don't visually overwhelm an already busy slide. ────────────
     sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
     tb(s, f"Most Frequent Hour: {ig_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {ig_raw.get('best_performing_hour','N/A')}",
-       0.55, 4.25, 12.23, 0.28, size=12, color=sub_color, font=FONT_MONO_LT)
+       0.55, 4.24, 12.23, 0.24, size=12, color=sub_color, font=FONT_MONO_LT)
     tb(s, f"Posting Consistency: {ig_raw.get('posting_consistency','N/A')}",
-       0.55, 4.55, 5.95, 0.28, size=12, color=sub_color, font=FONT_MONO_LT)
+       0.55, 4.50, 5.95, 0.24, size=12, color=sub_color, font=FONT_MONO_LT)
 
     momentum_direction = ig_raw.get("momentum_direction")
     momentum_pct       = ig_raw.get("momentum_pct", "N/A")
@@ -1478,26 +1514,20 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         momentum_color, momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {momentum_pct}"
     else:
         momentum_color, momentum_text = sub_color,      f"Momentum: {momentum_pct}"
-    tb(s, momentum_text, 6.60, 4.55, 5.65, 0.28, size=12, bold=True, color=momentum_color, font=FONT_MONO_MED)
+    tb(s, momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=momentum_color, font=FONT_MONO_MED)
 
-    # ── Profile photo — placed below all the metric rows above ───────
-    avatar_url = ig_raw.get("avatar_url")
-    if avatar_url:
-        try:
-            img_resp = requests.get(avatar_url, timeout=15)
-            if img_resp.status_code == 200:
-                s.shapes.add_picture(io.BytesIO(img_resp.content), Inches(0.55), Inches(4.95), height=Inches(1.45))
-        except Exception as e:
-            print(f"   ⚠️ Could not load profile avatar image: {e}")
-
-    card(s, 2.20, 4.95, 10.58, 1.45, "Instagram Analysis", analysis.get("instagram_analysis",""), dark_bg=dark)
+    # ── Instagram Analysis — full slide width now that the photo is
+    #    gone, with a hard character cap so long Claude output can
+    #    never overflow the card, regardless of what gets generated. ──
+    analysis_text = truncate_to_sentence(analysis.get("instagram_analysis",""), max_chars=480)
+    card(s, 0.55, 4.86, 12.23, 1.55, "Instagram Analysis", analysis_text, dark_bg=dark)
 
     tb(s, f"Most Active Day: {ig_raw.get('most_active_day','N/A')}   ·   Least Active Day: {ig_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
-       0.55, 6.50, 12.23, 0.28, size=11, color=sub_color, font=FONT_MONO_LT)
+       0.55, 6.50, 12.23, 0.22, size=11, color=sub_color, font=FONT_MONO_LT)
 
     outlier_note = ig_raw.get("outlier_note")
     if outlier_note:
-        tb(s, outlier_note, 0.55, 6.80, 12.23, 0.28, size=11, color=GOLD, font=FONT_MONO_LT)
+        tb(s, outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
 
     footer_bar(s, 3, dark_bg=dark)
 
