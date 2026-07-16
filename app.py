@@ -6,6 +6,8 @@ import os
 import re
 import io
 import time
+import threading
+import uuid
 from datetime import datetime, timezone
 from collections import Counter
 from dotenv import load_dotenv
@@ -24,7 +26,7 @@ APIFY_API_KEY     = os.getenv("APIFY_API_KEY")
 
 app = Flask(__name__)
 
-TOTAL_SLIDES = 17
+TOTAL_SLIDES = 19
 
 # ═══════════════════════════════════════════════════════════════
 # MIDNIGHT PANDA BRAND DESIGN TOKENS
@@ -794,6 +796,70 @@ def fetch_instagram_posts_via_apify(username):
     return all_posts
 
 
+def fetch_facebook_posts_via_apify(page_handle):
+    """
+    Fetches recent Facebook posts using apify/facebook-posts-scraper (the
+    official Apify actor for Facebook Pages).
+
+    HONEST CAVEAT: unlike the Instagram actors in this file, which went
+    through many rounds of real-world testing to confirm exact field
+    names, this Facebook actor has NOT yet been verified against real
+    output. The field-name guesses below are based on common Apify
+    Facebook-scraper conventions, with a wide fallback list per field
+    (same defensive pattern used for Instagram). Use the /debug_facebook
+    route to run one real test and confirm/adjust the field names before
+    trusting this at scale — same process that eventually nailed Instagram.
+    """
+    if not APIFY_API_KEY:
+        print("   ⚠️ No APIFY_API_KEY set")
+        return []
+
+    page_url = page_handle if page_handle.startswith("http") else f"https://www.facebook.com/{page_handle}"
+    fb_input = {
+        "startUrls": [{"url": page_url}],
+        "resultsLimit": 35,  # same buffer logic as Instagram — covers pinned-post displacement
+    }
+    try:
+        print(f"   🔄 Apify Facebook posts: fetching for {page_handle}...")
+        r = requests.post(
+            "https://api.apify.com/v2/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 120},
+            json=fb_input,
+            timeout=150
+        )
+        if r.status_code in (200, 201):
+            posts = r.json()
+            if isinstance(posts, list) and len(posts) > 0:
+                print(f"   ✅ Facebook post scraper returned {len(posts)} posts")
+                return posts
+        print(f"   ⚠️ Facebook post scraper sync empty/failed (status {r.status_code}), trying async...")
+        return fetch_apify_async(page_handle, "apify~facebook-posts-scraper", fb_input)
+    except Exception as e:
+        print(f"   ⚠️ Facebook post scraper error: {e}")
+        return []
+
+
+def _classify_facebook_post(post):
+    """
+    Facebook doesn't have a Carousel format like Instagram, so posts are
+    split into Photos / Videos / Links instead. Field name is a guess
+    (see caveat on fetch_facebook_posts_via_apify) — checked via a wide
+    fallback list, same defensive pattern as the Instagram classifier.
+    """
+    t = str(_get_first(post, ["type", "postType", "media_type", "mediaType"], "")).lower()
+    if "video" in t or "reel" in t:
+        return "videos"
+    elif "link" in t or "share" in t:
+        return "links"
+    elif "photo" in t or "image" in t or "album" in t:
+        return "photos"
+    # Fallback: if a video URL exists on the post, treat it as a video;
+    # otherwise assume photo, since that's the most common Facebook post type.
+    if _get_first(post, ["videoUrl", "video_url"]):
+        return "videos"
+    return "photos"
+
+
 def fetch_instagram(username):
     print(f"📸 Fetching Instagram: @{username}")
     data = {}
@@ -1014,24 +1080,132 @@ def fetch_facebook(username):
             params={"engine":"facebook_business_page","username":username,
                     "api_key":SEARCHAPI_KEY}
         )
-        if r.status_code == 200:
-            p = r.json().get("page", {})
-            data = {
-                "name":        p.get("name", username),
-                "followers":   str(p.get("followers",{}).get("count","N/A")),
-                "following":   str(p.get("following",{}).get("count","N/A")),
-                "category":    ", ".join(p.get("about",{}).get("category_formatted",[]) or []) or "N/A",
-                "about":       p.get("about",{}).get("description","") or p.get("about",{}).get("general_info",""),
-                "address":     p.get("address","") or "",
-                "phone":       p.get("phone","") or "",
-                "email":       p.get("email","") or "",
-                "website":     p.get("website","") or "",
-                "rating":      str(p.get("ratings",{}).get("value","N/A")),
-                "is_verified": "Yes" if p.get("is_verified") else "No",
-            }
-            print(f"   ✅ {data['followers']} followers")
+        if r.status_code != 200:
+            return data
+
+        p = r.json().get("page", {})
+        followers_raw = p.get("followers",{}).get("count","N/A")
+        try:
+            followers_n = int(str(followers_raw).replace(",",""))
+        except:
+            followers_n = 0
+
+        data = {
+            "name":        p.get("name", username),
+            "followers":   str(followers_raw),
+            "following":   str(p.get("following",{}).get("count","N/A")),
+            "category":    ", ".join(p.get("about",{}).get("category_formatted",[]) or []) or "N/A",
+            "about":       p.get("about",{}).get("description","") or p.get("about",{}).get("general_info",""),
+            "address":     p.get("address","") or "",
+            "phone":       p.get("phone","") or "",
+            "email":       p.get("email","") or "",
+            "website":     p.get("website","") or "",
+            "rating":      str(p.get("ratings",{}).get("value","N/A")),
+            "is_verified": "Yes" if p.get("is_verified") else "No",
+        }
+        print(f"   ✅ {data['followers']} followers")
+
+        # ── Posts via Apify — same pattern as Instagram ─────────────────
+        posts_raw = fetch_facebook_posts_via_apify(username)
+        print(f"   🔍 Facebook posts fetched: {len(posts_raw)}")
+
+        parsed = []
+        for post in posts_raw:
+            likes    = _get_first(post, ["likes", "likesCount", "reactionsCount", "reactions"], 0) or 0
+            comments = _get_first(post, ["comments", "commentsCount"], 0) or 0
+            shares   = _get_first(post, ["shares", "sharesCount"])
+            views    = _get_first(post, ["viewsCount", "views", "videoViewCount"])
+            url      = _get_first(post, ["url", "postUrl", "facebookUrl", "link"]) or "N/A"
+            ts       = _to_timestamp(_get_first(post, ["time", "timestamp", "date", "publishedAt"]))
+            ptype    = _classify_facebook_post(post)
+            try: likes = int(likes)
+            except: likes = 0
+            try: comments = int(comments)
+            except: comments = 0
+            parsed.append({
+                "type":     ptype,
+                "likes":    likes,
+                "comments": comments,
+                "shares":   (int(shares) if shares is not None else None),
+                "reposts":  None,  # Facebook has no repost concept — always None, reused
+                                    # formulas treat this as 0 automatically, same as Instagram's N/A handling
+                "views":    (int(views) if views is not None else None),
+                "url":      url,
+                "ts":       ts,
+            })
+
+        # ── Sort by REAL post date, keep the true most-recent 30 —
+        #    identical logic to the Instagram pinned-post fix. ──────────
+        posts_with_dates    = [pp for pp in parsed if pp["ts"] is not None]
+        posts_without_dates = [pp for pp in parsed if pp["ts"] is None]
+        posts_with_dates.sort(key=lambda pp: pp["ts"], reverse=True)
+        parsed = (posts_with_dates + posts_without_dates)[:30]
+
+        photos_group = [pp for pp in parsed if pp["type"] == "photos"]
+        videos_group = [pp for pp in parsed if pp["type"] == "videos"]
+        links_group  = [pp for pp in parsed if pp["type"] == "links"]
+        post_count   = len(parsed)
+
+        total_l = sum(pp["likes"] for pp in parsed)
+        total_c = sum(pp["comments"] for pp in parsed)
+        engagement_total = total_l + total_c
+        eng_rate = f"{(engagement_total/post_count/followers_n*100):.2f}%" if (post_count and followers_n) else "N/A"
+
+        vid_l = sum(pp["likes"] for pp in videos_group)
+        vid_c = sum(pp["comments"] for pp in videos_group)
+        eng_rate_videos = (f"{(vid_l+vid_c)/len(videos_group)/followers_n*100:.2f}%"
+                            if (videos_group and followers_n) else "N/A")
+
+        timestamps = [pp["ts"] for pp in parsed if pp["ts"]]
+        if len(timestamps) >= 2:
+            span_days = max((max(timestamps) - min(timestamps)) / 86400, 1)
+            posting_frequency = f"{(post_count / span_days * 7):.1f} / week"
+        else:
+            posting_frequency = "N/A"
+
+        # ── Reused directly from the Instagram pipeline — same formulas,
+        #    just fed Facebook's parsed posts instead. ───────────────────
+        day_dist      = compute_day_distribution(parsed)
+        hour_insights = compute_hour_insights(parsed)
+        consistency   = compute_posting_consistency(parsed)
+        momentum      = compute_momentum(parsed)
+
+        photos_metrics = _compute_group_metrics(photos_group, followers_n)
+        videos_metrics = _compute_group_metrics(videos_group, followers_n, is_reels=True)
+        links_metrics  = _compute_group_metrics(links_group,  followers_n)
+
+        data.update({
+            "sample_size":            post_count,
+            "engagement_rate":        eng_rate,
+            "engagement_rate_videos": eng_rate_videos,
+            "engagement_total":       engagement_total,
+            "posting_frequency":      posting_frequency,
+
+            "most_active_day":  day_dist["most_active_day"],
+            "least_active_day": day_dist["least_active_day"],
+
+            "most_frequent_hour":   hour_insights["most_frequent_hour"],
+            "best_performing_hour": hour_insights["best_performing_hour"],
+            "outlier_note":         hour_insights["outlier_note"],
+            "posting_consistency":  consistency,
+            "momentum_pct":         momentum["momentum_pct"],
+            "momentum_direction":   momentum["momentum_direction"],
+
+            "photo_count": len(photos_group),
+            "video_count": len(videos_group),
+            "link_count":  len(links_group),
+
+            "photos": photos_metrics,
+            "videos": videos_metrics,
+            "links":  links_metrics,
+        })
+        print(f"   ✅ {post_count} posts ({len(photos_group)} photos / {len(videos_group)} videos / "
+              f"{len(links_group)} links) | ER: {eng_rate}")
+
     except Exception as e:
+        import traceback
         print(f"   ⚠️ Facebook failed: {e}")
+        print(traceback.format_exc())
     return data
 
 
@@ -1206,6 +1380,13 @@ overall engagement, and comment on posting_frequency vs the general best-practic
 3-5 posts per week. Be specific and use the real numbers, but stay concise — no filler
 sentences, no repeated points.
 
+For the "facebook_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
+characters total) using the SAME benchmark bands as above, but applied to the FACEBOOK
+DATA's engagement_rate and engagement_rate_videos fields instead. Compare video
+engagement vs overall engagement, and comment on Facebook's posting_frequency vs the
+3-5 posts/week best practice. If Facebook's sample_size is 0 or very low, say so plainly
+instead of inventing benchmarks from missing data.
+
 Return ONLY a JSON object:
 {{
   "brand_name": "brand name",
@@ -1224,6 +1405,7 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
+  "facebook_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
   "youtube": {{
     "subscribers": "exact from data",
     "videos": "exact from data",
@@ -1675,35 +1857,113 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ], dark_bg=dark)
     footer_bar(s, 7, dark_bg=dark)
 
-    # ── SLIDE 8: Facebook Page (light) ─────────────────────────
+    # ── SLIDE 8: Facebook Overview (light) ──────────────────────
     s, dark = start_slide(prs, blank, 8)
-    kicker_header(s, "Facebook", "Facebook Page", handles.get('facebook','N/A'), dark_bg=dark)
+    kicker_header(s, "Facebook", "Facebook Overview",
+                  f"{handles.get('facebook','N/A')}  ·  Based on last {fb_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+
     stat_block(s, 0.55, 1.75, 3.86, fb_raw.get("followers","N/A"), "Page Followers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("following","N/A"), "Following", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, fb.get("rating","N/A"), "Page Rating", size=54, dark_bg=dark)
-    stat_block(s, 0.55, 3.10, 3.86, fb_raw.get("is_verified","No"), "Verified", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, str(fb.get("category","N/A") or "N/A")[:18], "Category", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.10, 3.86, "Facebook", "Platform", size=32, dark_bg=dark)
-    card(s, 0.55, 4.75, 12.23, 1.75, "Profile Gap", fb.get("about","N/A"), dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("sample_size","N/A"), "Posts Analyzed", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, fb_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
+    stat_block(s, 0.55, 3.15, 3.86, fb_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.15, 3.86, fb_raw.get("engagement_rate_videos","N/A"), "Engagement Rate (Videos Only)", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.15, 3.86, fb_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
+
+    fb_divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+    ln8 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
+    ln8.fill.solid(); ln8.fill.fore_color.rgb = fb_divider_color; ln8.line.fill.background()
+
+    fb_sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
+    tb(s, f"Most Frequent Hour: {fb_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {fb_raw.get('best_performing_hour','N/A')}",
+       0.55, 4.24, 12.23, 0.24, size=12, color=fb_sub_color, font=FONT_MONO_LT)
+    tb(s, f"Posting Consistency: {fb_raw.get('posting_consistency','N/A')}",
+       0.55, 4.50, 5.95, 0.24, size=12, color=fb_sub_color, font=FONT_MONO_LT)
+
+    fb_momentum_direction = fb_raw.get("momentum_direction")
+    fb_momentum_pct       = fb_raw.get("momentum_pct", "N/A")
+    if fb_momentum_direction == "up":
+        fb_momentum_color, fb_momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {fb_momentum_pct}"
+    elif fb_momentum_direction == "down":
+        fb_momentum_color, fb_momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {fb_momentum_pct}"
+    else:
+        fb_momentum_color, fb_momentum_text = fb_sub_color,   f"Momentum: {fb_momentum_pct}"
+    tb(s, fb_momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=fb_momentum_color, font=FONT_MONO_MED)
+
+    fb_analysis_text = truncate_to_sentence(analysis.get("facebook_analysis",""), max_chars=480)
+    card(s, 0.55, 4.86, 12.23, 1.55, "Facebook Analysis", fb_analysis_text, dark_bg=dark)
+
+    tb(s, f"Most Active Day: {fb_raw.get('most_active_day','N/A')}   ·   Least Active Day: {fb_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
+       0.55, 6.50, 12.23, 0.22, size=11, color=fb_sub_color, font=FONT_MONO_LT)
+
+    fb_outlier_note = fb_raw.get("outlier_note")
+    if fb_outlier_note:
+        tb(s, fb_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
+
     footer_bar(s, 8, dark_bg=dark)
 
-    # ── SLIDE 9: Facebook Insights (dark) ──────────────────────
+    # ── SLIDE 9: Facebook Content Strategy (dark) ───────────────
     s, dark = start_slide(prs, blank, 9)
-    kicker_header(s, "Facebook", "Facebook Insights", "Page details and strategic analysis", dark_bg=dark)
-    branded_table(s, ["Detail","Value"], [
-        ["Address", str(fb_raw.get("address","N/A") or "N/A")],
-        ["Phone",   str(fb_raw.get("phone","N/A")   or "N/A")],
-        ["Email",   str(fb_raw.get("email","N/A")   or "N/A")],
-        ["Website", str(fb_raw.get("website","N/A") or "N/A")],
-    ], 0.55, 1.75, 5.60, 2.60, dark_bg=dark)
-    card(s, 6.75, 1.75, 5.70, 1.35, "Strength", fb.get("strength","N/A"), dark_bg=dark)
-    card(s, 6.75, 3.25, 5.70, 1.90, "Recommendation", fb.get("recommendation","N/A"), dark_bg=dark)
-    filled = sum(1 for v in [fb_raw.get("address"),fb_raw.get("phone"),fb_raw.get("email"),fb_raw.get("website")] if v)
-    stat_block(s, 0.55, 4.75, 5.60, f"{filled} / 4", "Profile Fields Completed", size=54, dark_bg=dark)
+    kicker_header(s, "Facebook", "Content Strategy",
+                  f"Content mix from the last {fb_raw.get('sample_size',30)} posts", dark_bg=dark)
+    fb_photo_c = fb_raw.get("photo_count",0); fb_video_c = fb_raw.get("video_count",0); fb_link_c = fb_raw.get("link_count",0)
+    fb_total = max(fb_photo_c+fb_video_c+fb_link_c, 1)
+    fb_cd = ChartData()
+    fb_cd.categories = ["Photos","Videos","Links"]
+    fb_cd.add_series("Posts",(fb_photo_c,fb_video_c,fb_link_c))
+    fb_chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.85),Inches(5.40),Inches(4.50),fb_cd).chart
+    fb_chart.has_legend = True
+    for i, col in enumerate([GOLD, CARD_DARK, PIE_TAN]):
+        pt = fb_chart.plots[0].series[0].points[i]
+        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
+    for lbl, cnt, y in [("Videos",fb_video_c,2.10),("Photos",fb_photo_c,3.25),("Links",fb_link_c,4.40)]:
+        pct = int(round(cnt/fb_total*100))
+        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
+    card(s, 6.85, 5.55, 5.60, 1.00, "Facebook Strength", fb.get("strength",""), dark_bg=dark)
     footer_bar(s, 9, dark_bg=dark)
 
-    # ── SLIDE 10: YouTube Channel (light) ───────────────────────
+    # ── SLIDE 10: Facebook Photos Performance (light) ───────────
+    fb_photos = fb_raw.get("photos", {})
     s, dark = start_slide(prs, blank, 10)
+    kicker_header(s, "Facebook — Photos", "Photos Performance",
+                  f"Based on {fb_photos.get('n',0)} photo posts from the last {fb_raw.get('sample_size',30)}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, fb_photos.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, fb_photos.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, fb_photos.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
+    stat_block(s, 0.55, 3.10, 3.86, fb_photos.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.10, 3.86, fb_photos.get("avg_shares","N/A"), "Avg Shares / Post", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.10, 3.86, fb_raw.get("engagement_rate","N/A"), "Overall Engagement Rate", size=32, dark_bg=dark)
+    card_url(s, 0.55, 4.75, 5.95, 1.75,
+             f"Top-Performing Photo (score {fb_photos.get('top_score','N/A')})",
+             fb_photos.get("top_url","N/A"), dark_bg=dark)
+    card_url(s, 6.65, 4.75, 5.80, 1.75,
+             f"Lowest-Performing Photo (score {fb_photos.get('worst_score','N/A')})",
+             fb_photos.get("worst_url","N/A"), dark_bg=dark)
+    footer_bar(s, 10, dark_bg=dark)
+
+    # ── SLIDE 11: Facebook Videos Performance (dark) ────────────
+    fb_videos = fb_raw.get("videos", {})
+    s, dark = start_slide(prs, blank, 11)
+    kicker_header(s, "Facebook — Videos", "Videos Performance",
+                  f"Based on {fb_videos.get('n',0)} videos from the last {fb_raw.get('sample_size',30)}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, fb_videos.get("avg_engagement","N/A"), "Avg Engagement / Video", size=40, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, fb_videos.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=40, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, fb_videos.get("avg_views","N/A"), "Avg Views / Video", size=40, dark_bg=dark)
+    stat_block(s, 0.55, 2.95, 3.86, fb_videos.get("avg_likes","N/A"), "Avg Likes / Video", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 2.95, 3.86, fb_videos.get("avg_comments","N/A"), "Avg Comments / Video", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 2.95, 3.86, fb_videos.get("avg_shares","N/A"), "Avg Shares / Video", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 4.05, 3.86, fb_videos.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 4.05, 3.86, fb_videos.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 4.05, 3.86, fb_videos.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 5.15, 3.86, fb_videos.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
+    link_list_card(s, 0.55, 6.10, 12.23, 0.92, "Top / Worst / Max Views", [
+        (f"Top video (score {fb_videos.get('top_score','N/A')}):  ",     fb_videos.get("top_url","N/A")),
+        (f"Worst video (score {fb_videos.get('worst_score','N/A')}):  ", fb_videos.get("worst_url","N/A")),
+        (f"Max views ({fb_videos.get('max_views','N/A')}):  ",           fb_videos.get("max_views_url","N/A")),
+    ], dark_bg=dark)
+    footer_bar(s, 11, dark_bg=dark)
+
+    # ── SLIDE 12: YouTube Channel (light) ───────────────────────
+    s, dark = start_slide(prs, blank, 12)
     kicker_header(s, "YouTube", "YouTube Channel", handles.get('youtube','N/A'), dark_bg=dark)
     tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:220],
        0.55, 1.62, 12.23, 0.55, size=12.5, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
@@ -1714,10 +1974,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 4.73, 3.85, 3.86, yt_raw.get("joined","N/A"), "Joined Date", size=32, dark_bg=dark)
     stat_block(s, 8.92, 3.85, 3.86, "YouTube", "Platform", size=32, dark_bg=dark)
     card(s, 0.55, 5.35, 12.23, 1.15, "Reach Signal", yt.get("strength",""), dark_bg=dark)
-    footer_bar(s, 10, dark_bg=dark)
+    footer_bar(s, 12, dark_bg=dark)
 
-    # ── SLIDE 11: YouTube Insights (dark) ───────────────────────
-    s, dark = start_slide(prs, blank, 11)
+    # ── SLIDE 13: YouTube Insights (dark) ───────────────────────
+    s, dark = start_slide(prs, blank, 13)
     kicker_header(s, "YouTube", "Channel Insights", "Channel performance and strategic analysis", dark_bg=dark)
     branded_table(s, ["Metric","Value"], [
         ["Subscribers",  yt_raw.get("subscribers","N/A")],
@@ -1733,10 +1993,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 4.75, 5.60, vpv_str, "Views Per Video (Est.)", size=54, dark_bg=dark)
     card(s, 6.75, 1.65, 5.70, 1.75, "Strength", yt.get("strength","N/A"), dark_bg=dark)
     card(s, 6.75, 3.60, 5.70, 2.35, "Recommendation", yt.get("recommendation","N/A"), dark_bg=dark)
-    footer_bar(s, 11, dark_bg=dark)
+    footer_bar(s, 13, dark_bg=dark)
 
-    # ── SLIDE 12: LinkedIn (light) ──────────────────────────────
-    s, dark = start_slide(prs, blank, 12)
+    # ── SLIDE 14: LinkedIn (light) ──────────────────────────────
+    s, dark = start_slide(prs, blank, 14)
     kicker_header(s, "LinkedIn", "LinkedIn Company Page",
                   f"linkedin.com/company/{handles.get('linkedin','N/A')}", dark_bg=dark)
     stat_block(s, 0.55, 1.75, 3.86, li_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
@@ -1745,10 +2005,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 3.25, 12.23, 1.15, "Company Summary", li.get("summary","N/A"), dark_bg=dark)
     card(s, 0.55, 4.75, 5.95, 1.80, "Strength", li.get("strength","N/A"), dark_bg=dark)
     card(s, 6.65, 4.75, 5.80, 1.80, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
-    footer_bar(s, 12, dark_bg=dark)
+    footer_bar(s, 14, dark_bg=dark)
 
-    # ── SLIDE 13: LinkedIn Strategic Analysis (dark) ──────────
-    s, dark = start_slide(prs, blank, 13)
+    # ── SLIDE 15: LinkedIn Strategic Analysis (dark) ──────────
+    s, dark = start_slide(prs, blank, 15)
     kicker_header(s, "LinkedIn", "Strategic Analysis", "Professional presence and B2B opportunities", dark_bg=dark)
     branded_table(s, ["Metric","Value","Insight"], [
         ["Followers",     li_raw.get("followers","N/A"), "Professional audience size"],
@@ -1759,10 +2019,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ], 0.55, 1.65, 12.23, 2.85, dark_bg=dark)
     card(s, 0.55, 4.85, 5.95, 1.65, "Strength", li.get("strength","N/A"), dark_bg=dark)
     card(s, 6.65, 4.85, 5.80, 1.65, "Recommendation", li.get("recommendation","N/A"), dark_bg=dark)
-    footer_bar(s, 13, dark_bg=dark)
+    footer_bar(s, 15, dark_bg=dark)
 
-    # ── SLIDE 14: Cross-Platform Comparison (light) ───────────
-    s, dark = start_slide(prs, blank, 14)
+    # ── SLIDE 16: Cross-Platform Comparison (light) ───────────
+    s, dark = start_slide(prs, blank, 16)
     kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=dark)
     ig_f = parse_num(ig_raw.get("followers",0)); fb_f = parse_num(fb_raw.get("followers",0))
     yt_f = parse_num(yt_raw.get("subscribers",0)); li_f = parse_num(li_raw.get("followers",0))
@@ -1786,10 +2046,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ("LinkedIn",  li_raw.get("followers","N/A")),
     ]):
         stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=dark)
-    footer_bar(s, 14, dark_bg=dark)
+    footer_bar(s, 16, dark_bg=dark)
 
-    # ── SLIDE 15: Engagement Benchmarks (dark) ────────────────
-    s, dark = start_slide(prs, blank, 15)
+    # ── SLIDE 17: Engagement Benchmarks (dark) ────────────────
+    s, dark = start_slide(prs, blank, 17)
     kicker_header(s, "Benchmarks", "Engagement Benchmarks",
                   "Performance metrics vs. industry standards", dark_bg=dark)
     def er_status(val):
@@ -1801,15 +2061,16 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["Instagram","Engagement Rate",   ig_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(ig_raw.get("engagement_rate","0"))],
         ["Instagram","Reels Engagement",  ig_raw.get("engagement_rate_reels","N/A"), ">3% is good",        er_status(ig_raw.get("engagement_rate_reels","0"))],
         ["Instagram","Posting Frequency", ig_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
-        ["Facebook", "Page Followers",    fb_raw.get("followers","N/A"),             "Varies by industry", "—"],
+        ["Facebook", "Engagement Rate",   fb_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(fb_raw.get("engagement_rate","0"))],
+        ["Facebook", "Posting Frequency", fb_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
         ["YouTube",  "Subscribers",       yt_raw.get("subscribers","N/A"),           "Varies by niche",    "—"],
         ["YouTube",  "Views / Video",     vpv_str,                                   ">1,000 is good",     "—"],
         ["LinkedIn", "Followers",         li_raw.get("followers","N/A"),             "Varies by industry", "—"],
     ], 0.55, 1.65, 12.23, 4.90, dark_bg=dark)
-    footer_bar(s, 15, dark_bg=dark)
+    footer_bar(s, 17, dark_bg=dark)
 
-    # ── SLIDE 16: Strengths & Gaps (light) ────────────────────
-    s, dark = start_slide(prs, blank, 16)
+    # ── SLIDE 18: Strengths & Gaps (light) ────────────────────
+    s, dark = start_slide(prs, blank, 18)
     kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps",
                   "What's working, and what needs attention", dark_bg=dark)
     card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",  cp.get("strongest_platform","N/A"),  dark_bg=dark)
@@ -1817,10 +2078,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
     card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",  cp.get("growth_opportunity","N/A"),  dark_bg=dark)
     card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",    analysis.get("overall_summary","N/A"), dark_bg=dark)
-    footer_bar(s, 16, dark_bg=dark)
+    footer_bar(s, 18, dark_bg=dark)
 
-    # ── SLIDE 17: Recommendations (dark) ──────────────────────
-    s, dark = start_slide(prs, blank, 17)
+    # ── SLIDE 19: Recommendations (dark) ──────────────────────
+    s, dark = start_slide(prs, blank, 19)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
     tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65,
        size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
@@ -1833,7 +2094,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=dark)
     tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Apify + Claude AI",
        0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
-    footer_bar(s, 17, dark_bg=dark)
+    footer_bar(s, 19, dark_bg=dark)
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
@@ -1842,6 +2103,112 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     prs.save(path)
     print(f"✅ PPT saved: {path}")
     return path, safe_name
+
+
+# ═══════════════════════════════════════════════════════════════
+# ASYNC JOB SYSTEM
+# ═══════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS: the old /generate route did all the work — handle
+# discovery, 4 platform fetches, Claude analysis, PPT building — inside
+# one single HTTP request. As the pipeline grew (especially the new
+# shares/reposts enrichment step), that request started taking long
+# enough that the browser or Railway would give up waiting and show a
+# generic "upstream error", EVEN THOUGH THE SERVER KEPT WORKING AND
+# FINISHED THE REPORT ANYWAY IN THE BACKGROUND. Proof of this: the logs
+# showed "PPT saved" and a 200 response for a request the user had
+# already seen fail.
+#
+# THE FIX: /generate now only does one thing — kick off the real work
+# on a background thread and return a job_id immediately (in well under
+# a second, every time). The page then polls /status/<job_id> every
+# couple of seconds until the job is done. No single request is ever
+# open long enough to time out, no matter how slow a report gets.
+#
+# IMPORTANT DEPLOYMENT NOTE: job progress is stored in memory (JOBS
+# dict below), not a database. This is intentional — simple and
+# sufficient for a low-traffic internal tool — but it ONLY works
+# correctly if the app runs as a SINGLE process/worker. If your
+# Procfile or Railway start command runs gunicorn with more than one
+# worker (e.g. "--workers 2"), a job started on worker A may not be
+# visible when a later /status request lands on worker B, and polling
+# would incorrectly show "not found". Check your Procfile — it should
+# specify a single worker, e.g.:
+#     web: gunicorn app:app --workers 1 --timeout 300
+# A single worker is completely fine for one agency's internal usage.
+
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+JOB_MAX_AGE_SECONDS = 2 * 60 * 60  # auto-forget jobs older than 2 hours
+
+def _cleanup_old_jobs():
+    cutoff = time.time() - JOB_MAX_AGE_SECONDS
+    stale = [jid for jid, j in JOBS.items() if j.get("created_at", 0) < cutoff]
+    for jid in stale:
+        del JOBS[jid]
+
+def _job_update(job_id, **fields):
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            JOBS[job_id].update(fields)
+
+def _job_add_step(job_id, label):
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            JOBS[job_id]["steps"].append(label)
+
+def run_generate_job(job_id, website_url):
+    """Runs the full report pipeline on a background thread. Never touches
+    the HTTP request/response cycle directly — only writes progress into
+    the JOBS dict, which /status/<job_id> reads."""
+    try:
+        _job_update(job_id, status="running")
+
+        _job_add_step(job_id, "Scanning website for social handles")
+        handles = discover_all_handles(website_url)
+
+        ig_raw = {}
+        if handles.get("instagram"):
+            _job_add_step(job_id, "Fetching Instagram profile data")
+            ig_raw = fetch_instagram(handles.get("instagram"))
+
+        fb_raw = {}
+        if handles.get("facebook"):
+            _job_add_step(job_id, "Fetching Facebook page data")
+            fb_raw = fetch_facebook(handles.get("facebook"))
+
+        yt_raw = {}
+        if handles.get("youtube"):
+            _job_add_step(job_id, "Fetching YouTube channel data")
+            yt_raw = fetch_youtube(handles.get("youtube"))
+
+        domain_for_brand = website_url.replace("https://","").replace("http://","").rstrip("/")
+        brand_for_search = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain_for_brand).replace("www.","")
+        li_raw = {}
+        if handles.get("linkedin"):
+            _job_add_step(job_id, "Fetching LinkedIn data")
+            li_raw = fetch_linkedin(handles.get("linkedin"), brand_for_search)
+
+        _job_add_step(job_id, "Analysing with Claude AI")
+        analysis = analyse_with_claude(website_url, handles, ig_raw, fb_raw, yt_raw, li_raw)
+
+        _job_add_step(job_id, f"Building {TOTAL_SLIDES}-slide PowerPoint")
+        ppt_path, safe_name = create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url)
+
+        _job_update(job_id, status="done", result={
+            "success":      True,
+            "brand":        analysis.get("brand_name",""),
+            "handles":      handles,
+            "analysis":     analysis,
+            "download_url": f"/download/{safe_name}"
+        })
+
+    except ValueError as e:
+        _job_update(job_id, status="error", error=str(e), error_code=404)
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        _job_update(job_id, status="error", error=str(e), error_code=500)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1854,35 +2221,52 @@ def index():
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    try:
-        body        = request.get_json()
-        website_url = body.get("website_url","").strip()
-        if not website_url:
-            return jsonify({"error":"Please enter a website URL"}), 400
-        handles  = discover_all_handles(website_url)
-        ig_raw   = fetch_instagram(handles.get("instagram","")) if handles.get("instagram") else {}
-        fb_raw   = fetch_facebook(handles.get("facebook",""))   if handles.get("facebook")  else {}
-        yt_raw   = fetch_youtube(handles.get("youtube",""))     if handles.get("youtube")   else {}
+    body        = request.get_json()
+    website_url = (body or {}).get("website_url","").strip()
+    if not website_url:
+        return jsonify({"error":"Please enter a website URL"}), 400
 
-        domain_for_brand = website_url.replace("https://","").replace("http://","").rstrip("/")
-        brand_for_search = re.sub(r'\.(com|in|io|co|net|org|app).*','', domain_for_brand).replace("www.","")
-        li_raw   = fetch_linkedin(handles.get("linkedin",""), brand_for_search) if handles.get("linkedin") else {}
+    with JOBS_LOCK:
+        _cleanup_old_jobs()
+        job_id = str(uuid.uuid4())
+        JOBS[job_id] = {
+            "status": "starting",
+            "steps": [],
+            "result": None,
+            "error": None,
+            "created_at": time.time(),
+        }
 
-        analysis = analyse_with_claude(website_url, handles, ig_raw, fb_raw, yt_raw, li_raw)
-        ppt_path, safe_name = create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url)
+    thread = threading.Thread(target=run_generate_job, args=(job_id, website_url), daemon=True)
+    thread.start()
+
+    # Returns almost instantly — this request never does the slow work,
+    # so it can never be the thing that times out.
+    return jsonify({"job_id": job_id}), 202
+
+@app.route("/status/<job_id>")
+def job_status(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found (it may have expired, or the server restarted)"}), 404
+        snapshot = dict(job)  # copy fields out before releasing the lock
+
+    if snapshot["status"] == "error":
         return jsonify({
-            "success":      True,
-            "brand":        analysis.get("brand_name",""),
-            "handles":      handles,
-            "analysis":     analysis,
-            "download_url": f"/download/{safe_name}"
+            "status": "error",
+            "steps":  snapshot["steps"],
+            "error":  snapshot["error"],
+        }), snapshot.get("error_code", 500)
+
+    if snapshot["status"] == "done":
+        return jsonify({
+            "status": "done",
+            "steps":  snapshot["steps"],
+            **snapshot["result"],
         })
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"status": snapshot["status"], "steps": snapshot["steps"]})
 
 @app.route("/download/<safe_name>")
 def download(safe_name):
@@ -1904,6 +2288,23 @@ def debug_repost():
         "requested_url": post_url,
         "metrics_found": results.get(post_url) or results,
     })
+
+@app.route("/debug_facebook/<username>")
+def debug_facebook(username):
+    """Run this once against a real Facebook Page to check the raw Apify
+    output — the field names in fetch_facebook_posts_via_apify /
+    _classify_facebook_post are best-effort guesses and may need
+    adjusting once you see real data, same process used to verify
+    Instagram's fields."""
+    try:
+        posts = fetch_facebook_posts_via_apify(username)
+        return jsonify({
+            "total_posts_returned": len(posts),
+            "first_post_full":      posts[0] if posts else "no posts found",
+            "second_post_full":     posts[1] if len(posts) > 1 else "n/a",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/debug_instagram/<username>")
 def debug_instagram(username):
@@ -1928,4 +2329,7 @@ def debug_instagram(username):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # threaded=True is required here: without it, Flask's built-in server
+    # handles one request at a time, which would block /status polling
+    # while a report is being generated in the background.
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
