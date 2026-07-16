@@ -506,6 +506,29 @@ def compute_momentum(parsed):
         "momentum_direction": "up" if pct_change >= 0 else "down",
     }
 
+def _smart_round(value, max_decimals=2):
+    """
+    Rounds to a whole number normally (e.g. 4.2 -> "4"), but if that
+    would hide a real, non-zero value behind a flat "0" (e.g. 0.375
+    likes/post), keeps adding decimal places until the number is
+    actually visible — up to max_decimals. A genuinely-zero value still
+    correctly shows "0". This fixes averages that looked misleadingly
+    flat on low-volume post groups (e.g. 8 videos with only 3 total
+    likes between them) while every other stat on the same slide showed
+    a proper decimal.
+    """
+    if value == 0:
+        return "0"
+    rounded = round(value)
+    if rounded != 0:
+        return str(rounded)
+    for d in range(1, max_decimals + 1):
+        r = round(value, d)
+        if r != 0:
+            return f"{r:.{d}f}"
+    return f"{value:.{max_decimals}f}"
+
+
 def _compute_group_metrics(posts_group, followers, is_reels=False):
     n = len(posts_group)
     if n == 0:
@@ -529,10 +552,10 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
         "n":               n,
         "avg_engagement":  round(avg_engagement, 1),
         "er_per_follower": f"{er_per_follower:.2f}%",
-        "avg_likes":       round(total_likes / n),
-        "avg_comments":    round(total_comments / n),
-        "avg_shares":      round(total_shares / n) if shares_known else "N/A",
-        "avg_reposts":     round(total_reposts / n) if reposts_known else "N/A",
+        "avg_likes":       _smart_round(total_likes / n),
+        "avg_comments":    _smart_round(total_comments / n),
+        "avg_shares":      _smart_round(total_shares / n) if shares_known else "N/A",
+        "avg_reposts":     _smart_round(total_reposts / n) if reposts_known else "N/A",
         "top_score":       _score(top),
         "top_url":         top["url"],
         "worst_score":     _score(worst),
@@ -542,7 +565,7 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
     if is_reels:
         views_known = [p["views"] for p in posts_group if p["views"] is not None]
         total_views = sum(views_known) if views_known else 0
-        result["avg_views"] = round(total_views / n) if views_known else "N/A"
+        result["avg_views"] = _smart_round(total_views / n) if views_known else "N/A"
         if views_known:
             max_v = max(posts_group, key=lambda p: p["views"] or 0)
             result["max_views"]     = max_v["views"]
@@ -557,6 +580,7 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
         result["share_rate"]   = f"{(total_shares/total_views*100):.2f}%"   if (total_views and shares_known) else "N/A"
         result["repost_rate"]  = f"{(total_reposts/total_views*100):.2f}%"  if (total_views and reposts_known) else "N/A"
         result["er_by_view"]   = f"{((total_likes+total_comments+total_shares+total_reposts)/total_views*100):.2f}%" if total_views else "N/A"
+
 
     return result
 
