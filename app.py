@@ -1340,6 +1340,71 @@ def card(slide, x, y, w, h, label, body, dark_bg=False):
     tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=12.5, color=body_color,
        font=FONT_MONO_LT, line_spacing=1.15)
 
+def card_url(slide, x, y, w, h, label, url, dark_bg=False):
+    """
+    Same visual style as card(), but the body is a real clickable
+    hyperlink to the actual Instagram post — opens the post when
+    clicked in PowerPoint / Keynote / Google Slides, instead of just
+    showing plain, unclickable text.
+    """
+    fill_color = CARD_DARK if dark_bg else CARD_LIGHT
+    body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
+    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
+    r.fill.solid(); r.fill.fore_color.rgb = fill_color; r.line.fill.background()
+    try: r.adjustments[0] = 0.06
+    except: pass
+    tb(slide, label.upper(), x+0.28, y+0.18, w-0.56, 0.30, size=10.5, color=GOLD, font=FONT_MONO_MED)
+    box = slide.shapes.add_textbox(Inches(x+0.28), Inches(y+0.50), Inches(w-0.56), Inches(h-0.6))
+    tf = box.text_frame; tf.word_wrap = True
+    p = tf.paragraphs[0]; p.line_spacing = 1.15
+    run = p.add_run()
+    if url and url != "N/A":
+        run.text = shorten_url(url, 50)
+        run.hyperlink.address = url
+        run.font.color.rgb = GOLD
+    else:
+        run.text = "N/A"
+        run.font.color.rgb = body_color
+    run.font.size = Pt(12.5)
+    run.font.name = FONT_MONO_LT
+    return box
+
+def link_list_card(slide, x, y, w, h, label, items, dark_bg=False):
+    """
+    A compact card showing several "label: link" lines stacked vertically
+    (e.g. Top reel / Worst reel / Max views) rather than squeezed onto
+    one long concatenated line — that's what was overflowing past the
+    card edge and colliding with the footer before. Each url becomes a
+    real clickable hyperlink.
+
+    items: list of (prefix_text, url) tuples, one per line.
+    """
+    fill_color = CARD_DARK if dark_bg else CARD_LIGHT
+    body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
+    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
+    r.fill.solid(); r.fill.fore_color.rgb = fill_color; r.line.fill.background()
+    try: r.adjustments[0] = 0.06
+    except: pass
+    tb(slide, label.upper(), x+0.28, y+0.14, w-0.56, 0.22, size=10, color=GOLD, font=FONT_MONO_MED)
+
+    n = max(len(items), 1)
+    line_h = (h - 0.38) / n
+    for i, (prefix, url) in enumerate(items):
+        box = slide.shapes.add_textbox(Inches(x+0.28), Inches(y+0.36+i*line_h), Inches(w-0.56), Inches(line_h))
+        tf = box.text_frame; tf.word_wrap = False
+        p = tf.paragraphs[0]
+        run1 = p.add_run(); run1.text = prefix
+        run1.font.size = Pt(11.5); run1.font.name = FONT_MONO_LT; run1.font.color.rgb = body_color
+        run2 = p.add_run()
+        if url and url != "N/A":
+            run2.text = shorten_url(url, 44)
+            run2.hyperlink.address = url
+            run2.font.color.rgb = GOLD
+        else:
+            run2.text = "N/A"
+            run2.font.color.rgb = body_color
+        run2.font.size = Pt(11.5); run2.font.name = FONT_MONO
+
 def branded_table(slide, headers, rows, x, y, w, h, dark_bg=False):
     cols = len(headers)
     tbl  = slide.shapes.add_table(len(rows)+1, cols, Inches(x), Inches(y), Inches(w), Inches(h)).table
@@ -1561,12 +1626,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 3.10, 3.86, ig_images.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
     stat_block(s, 4.73, 3.10, 3.86, ig_images.get("avg_shares","N/A"), "Avg Shares / Post", size=32, dark_bg=dark)
     stat_block(s, 8.92, 3.10, 3.86, ig_images.get("avg_reposts","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
-    card(s, 0.55, 4.75, 5.95, 1.75,
-         f"Top-Performing Image (score {ig_images.get('top_score','N/A')})",
-         shorten_url(ig_images.get("top_url","N/A")), dark_bg=dark)
-    card(s, 6.65, 4.75, 5.80, 1.75,
-         f"Lowest-Performing Image (score {ig_images.get('worst_score','N/A')})",
-         shorten_url(ig_images.get("worst_url","N/A")), dark_bg=dark)
+    card_url(s, 0.55, 4.75, 5.95, 1.75,
+             f"Top-Performing Image (score {ig_images.get('top_score','N/A')})",
+             ig_images.get("top_url","N/A"), dark_bg=dark)
+    card_url(s, 6.65, 4.75, 5.80, 1.75,
+             f"Lowest-Performing Image (score {ig_images.get('worst_score','N/A')})",
+             ig_images.get("worst_url","N/A"), dark_bg=dark)
     footer_bar(s, 5, dark_bg=dark)
 
     # ── SLIDE 6: Carousels Performance (light) ────────────────
@@ -1579,12 +1644,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 3.10, 3.86, ig_carousels.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
     stat_block(s, 4.73, 3.10, 3.86, ig_carousels.get("avg_shares","N/A"), "Avg Shares / Post", size=32, dark_bg=dark)
     stat_block(s, 8.92, 3.10, 3.86, ig_carousels.get("avg_reposts","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
-    card(s, 0.55, 4.75, 5.95, 1.75,
-         f"Top-Performing Carousel (score {ig_carousels.get('top_score','N/A')})",
-         shorten_url(ig_carousels.get("top_url","N/A")), dark_bg=dark)
-    card(s, 6.65, 4.75, 5.80, 1.75,
-         f"Lowest-Performing Carousel (score {ig_carousels.get('worst_score','N/A')})",
-         shorten_url(ig_carousels.get("worst_url","N/A")), dark_bg=dark)
+    card_url(s, 0.55, 4.75, 5.95, 1.75,
+             f"Top-Performing Carousel (score {ig_carousels.get('top_score','N/A')})",
+             ig_carousels.get("top_url","N/A"), dark_bg=dark)
+    card_url(s, 6.65, 4.75, 5.80, 1.75,
+             f"Lowest-Performing Carousel (score {ig_carousels.get('worst_score','N/A')})",
+             ig_carousels.get("worst_url","N/A"), dark_bg=dark)
     footer_bar(s, 6, dark_bg=dark)
 
     # ── SLIDE 7: Reels Performance (dark) ─────────────────────
@@ -1603,11 +1668,11 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 5.15, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 4.73, 5.15, 3.86, ig_reels.get("repost_rate","N/A"), "Repost Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 8.92, 5.15, 3.86, ig_reels.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
-    top_line   = f"Top reel (score {ig_reels.get('top_score','N/A')}): {shorten_url(ig_reels.get('top_url','N/A'),36)}"
-    worst_line = f"Worst reel (score {ig_reels.get('worst_score','N/A')}): {shorten_url(ig_reels.get('worst_url','N/A'),36)}"
-    max_line   = f"Max views ({ig_reels.get('max_views','N/A')}): {shorten_url(ig_reels.get('max_views_url','N/A'),36)}"
-    card(s, 0.55, 6.30, 12.23, 0.90, "Top / Worst / Max Views",
-         f"{top_line}   |   {worst_line}   |   {max_line}", dark_bg=dark)
+    link_list_card(s, 0.55, 6.10, 12.23, 0.92, "Top / Worst / Max Views", [
+        (f"Top reel (score {ig_reels.get('top_score','N/A')}):  ",       ig_reels.get("top_url","N/A")),
+        (f"Worst reel (score {ig_reels.get('worst_score','N/A')}):  ",   ig_reels.get("worst_url","N/A")),
+        (f"Max views ({ig_reels.get('max_views','N/A')}):  ",            ig_reels.get("max_views_url","N/A")),
+    ], dark_bg=dark)
     footer_bar(s, 7, dark_bg=dark)
 
     # ── SLIDE 8: Facebook Page (light) ─────────────────────────
