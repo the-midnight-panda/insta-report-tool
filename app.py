@@ -1301,38 +1301,73 @@ def fetch_youtube(channel_id):
 
 def fetch_linkedin_posts_via_apify(company_handle):
     """
-    Fetches recent LinkedIn company posts using
-    data-slayer/linkedin-company-posts-scraper. Same honest caveat as
-    the Facebook integration: field names are a best-effort guess based
-    on the actor's public documentation, not yet verified against real
-    output. Use /debug_linkedin to confirm/adjust before trusting at scale.
+    Fetches recent LinkedIn company posts. Primary actor:
+    brilliant_gum/linkedin-company-post-scraper — chosen because its
+    documentation explicitly supports sorting by "recent" (chronological,
+    newest first) and up to 500 posts per run.
+
+    Fallback: data-slayer/linkedin-company-posts-scraper — already
+    verified working against real data (field names confirmed), but it
+    accepts ONLY a URL: it ignores any limit parameter (docs: "One
+    field. Paste your company URLs and run."), which is why it
+    returned just 10 posts. Kept as a safety net in case the primary
+    actor's input guesses need adjusting.
+
+    HONEST CAVEAT: brilliant_gum's exact input field names are
+    best-effort guesses from its documentation (sort "recent"/"top",
+    a post limit, pagination via start page) — not yet verified against
+    a real run. Use /debug_linkedin to confirm. If the primary returns
+    nothing, the proven fallback keeps reports working meanwhile.
     """
     if not APIFY_API_KEY:
         print("   ⚠️ No APIFY_API_KEY set")
         return []
 
     company_url = company_handle if company_handle.startswith("http") else f"https://www.linkedin.com/company/{company_handle}"
-    li_input = {
-        "startUrls": [{"url": company_url}],
-        "resultsLimit": 35,
+
+    # ── Primary: brilliant_gum (recent-sort + higher post limit) ──
+    primary_input = {
+        "company_url": company_url,
+        "sort_type":   "recent",
+        "limit":       35,
+        "start_page":  1,
     }
     try:
-        print(f"   🔄 Apify LinkedIn posts: fetching for {company_handle}...")
+        print(f"   🔄 Apify LinkedIn posts (primary, sort=recent): {company_handle}...")
         r = requests.post(
-            "https://api.apify.com/v2/acts/data-slayer~linkedin-company-posts-scraper/run-sync-get-dataset-items",
+            "https://api.apify.com/v2/acts/brilliant_gum~linkedin-company-post-scraper/run-sync-get-dataset-items",
             params={"token": APIFY_API_KEY, "timeout": 120},
-            json=li_input,
+            json=primary_input,
             timeout=150
         )
         if r.status_code in (200, 201):
             posts = r.json()
             if isinstance(posts, list) and len(posts) > 0:
-                print(f"   ✅ LinkedIn post scraper returned {len(posts)} posts")
+                print(f"   ✅ Primary LinkedIn scraper returned {len(posts)} posts")
                 return posts
-        print(f"   ⚠️ LinkedIn post scraper sync empty/failed (status {r.status_code}), trying async...")
-        return fetch_apify_async(company_handle, "data-slayer~linkedin-company-posts-scraper", li_input)
+        print(f"   ⚠️ Primary LinkedIn scraper empty/failed (status {r.status_code}), falling back...")
     except Exception as e:
-        print(f"   ⚠️ LinkedIn post scraper error: {e}")
+        print(f"   ⚠️ Primary LinkedIn scraper error: {e}, falling back...")
+
+    # ── Fallback: data-slayer (proven field names, URL-only input) ──
+    fallback_input = {"startUrls": [{"url": company_url}]}
+    try:
+        print(f"   🔄 Apify LinkedIn posts (fallback): {company_handle}...")
+        r = requests.post(
+            "https://api.apify.com/v2/acts/data-slayer~linkedin-company-posts-scraper/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 120},
+            json=fallback_input,
+            timeout=150
+        )
+        if r.status_code in (200, 201):
+            posts = r.json()
+            if isinstance(posts, list) and len(posts) > 0:
+                print(f"   ✅ Fallback LinkedIn scraper returned {len(posts)} posts")
+                return posts
+        print(f"   ⚠️ Fallback LinkedIn scraper sync empty/failed (status {r.status_code}), trying async...")
+        return fetch_apify_async(company_handle, "data-slayer~linkedin-company-posts-scraper", fallback_input)
+    except Exception as e:
+        print(f"   ⚠️ Fallback LinkedIn scraper error: {e}")
         return []
 
 
