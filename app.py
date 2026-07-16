@@ -1325,22 +1325,21 @@ def fetch_linkedin_posts_via_apify(company_handle):
 
     company_url = company_handle if company_handle.startswith("http") else f"https://www.linkedin.com/company/{company_handle}"
 
-    # ── Primary: brilliant_gum (recent-sort + higher post limit) ──
-    # Input field names CONFIRMED from the actor's official docs
-    # (earlier guessed names like company_url/sort_type were wrong and
-    # made the actor reject every run, silently triggering the 10-post
-    # fallback):
-    #   linkedinUrl (required), maxPosts (default 500), sortBy
-    #   ("recent" = newest first), startPage
+    # ── Primary: harvestapi/linkedin-company-posts ──────────────────
+    # Input format CONFIRMED verbatim from Apify's official API example
+    # for this actor: {"targetUrls": [...], "maxPosts": N}.
+    # HarvestAPI: 5.8K users, 5.0 rating, $2/1k posts. Scrapes newest-
+    # first by design ("from now up to postedLimitDate").
+    # (Previous primary, brilliant_gum, was a 15-user unrated actor that
+    # rejected every API run — likely needed manual rental activation.)
     primary_input = {
-        "linkedinUrl": company_url,
-        "maxPosts":    35,
-        "sortBy":      "recent",
+        "targetUrls": [company_url],
+        "maxPosts":   35,
     }
     try:
-        print(f"   🔄 Apify LinkedIn posts (primary, sort=recent): {company_handle}...")
+        print(f"   🔄 Apify LinkedIn posts (harvestapi, newest-first): {company_handle}...")
         r = requests.post(
-            "https://api.apify.com/v2/acts/brilliant_gum~linkedin-company-post-scraper/run-sync-get-dataset-items",
+            "https://api.apify.com/v2/acts/harvestapi~linkedin-company-posts/run-sync-get-dataset-items",
             params={"token": APIFY_API_KEY, "timeout": 120},
             json=primary_input,
             timeout=150
@@ -1419,7 +1418,7 @@ def _classify_linkedin_post(post):
     if post.get("poll") or _get_first(post, ["poll_options","pollOptions"]):
         return "polls"
 
-    text = str(post.get("text","") or post.get("commentary","")).lower()
+    text = str(post.get("text","") or post.get("commentary","") or post.get("content","")).lower()
     if not attachments and not text:
         return "text_only"
     if "linkedin.com/pulse" in text or _get_first(post, ["article_url","articleUrl"]):
@@ -1540,26 +1539,47 @@ def fetch_linkedin(company_handle, brand_name=None):
 
         parsed = []
         for post in posts_raw:
-            # Field names cover BOTH actors: brilliant_gum (num_likes,
-            # num_comments, num_reposts, posted) and the data-slayer
-            # fallback (likes, comments, shares, created_at).
-            likes    = _get_first(post, ["num_likes", "likes", "reactions", "likesCount", "reactionsCount"], 0) or 0
-            comments = _get_first(post, ["num_comments", "comments", "commentsCount"], 0) or 0
-            shares   = _get_first(post, ["num_reposts", "shares", "reposts", "sharesCount", "repostsCount"])
-            url      = _get_first(post, ["url", "postUrl", "linkedinUrl", "link"]) or "N/A"
+            # Covers all three actors seen so far:
+            # - harvestapi:    possibly nested "engagement" {likes, comments,
+            #                  shares} and "postedAt" {timestamp/date}; text
+            #                  in "content"
+            # - brilliant_gum: num_likes / num_comments / num_reposts / posted
+            # - data-slayer:   likes / comments / shares / created_at
+            engagement = post.get("engagement") if isinstance(post.get("engagement"), dict) else {}
+            likes    = _get_first(engagement, ["likes", "reactions"], None)
+            if likes is None:
+                likes = _get_first(post, ["num_likes", "likes", "reactions", "likesCount", "reactionsCount"], 0) or 0
+            comments = _get_first(engagement, ["comments"], None)
+            if comments is None:
+                comments = _get_first(post, ["num_comments", "comments", "commentsCount"], 0) or 0
+            shares   = _get_first(engagement, ["shares", "reposts"], None)
+            if shares is None:
+                shares = _get_first(post, ["num_reposts", "shares", "reposts", "sharesCount", "repostsCount"])
 
-            # Timestamp: try each candidate until one actually PARSES.
-            # A plain "first non-empty" pick would grab brilliant_gum's
-            # "time" field ("2 days ago" — a relative string), fail to
-            # parse it, and silently lose the date. "posted" (real UTC
-            # datetime) must win when present.
+            url = _get_first(post, ["linkedinUrl", "url", "postUrl", "link"]) or "N/A"
+
+            # Timestamp: try each candidate until one actually PARSES —
+            # a plain "first non-empty" pick would grab relative strings
+            # like "2 days ago" and silently lose the date. Nested
+            # postedAt objects (harvestapi) are checked first.
             ts = None
-            for ts_field in ["posted", "created_at", "timestamp", "date", "publishedAt", "postedAt", "time"]:
-                candidate = post.get(ts_field)
-                if candidate not in (None, ""):
-                    ts = _to_timestamp(candidate)
-                    if ts is not None:
-                        break
+            posted_at = post.get("postedAt")
+            if isinstance(posted_at, dict):
+                for k in ["timestamp", "date", "postedDate"]:
+                    candidate = posted_at.get(k)
+                    if candidate not in (None, ""):
+                        ts = _to_timestamp(candidate)
+                        if ts is not None:
+                            break
+            if ts is None:
+                for ts_field in ["posted", "postedAt", "created_at", "timestamp", "date", "publishedAt", "postedDate", "time"]:
+                    candidate = post.get(ts_field)
+                    if isinstance(candidate, dict):
+                        continue
+                    if candidate not in (None, ""):
+                        ts = _to_timestamp(candidate)
+                        if ts is not None:
+                            break
 
             ptype    = _classify_linkedin_post(post)
             try: likes = int(likes)
