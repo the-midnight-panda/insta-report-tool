@@ -1326,11 +1326,16 @@ def fetch_linkedin_posts_via_apify(company_handle):
     company_url = company_handle if company_handle.startswith("http") else f"https://www.linkedin.com/company/{company_handle}"
 
     # ── Primary: brilliant_gum (recent-sort + higher post limit) ──
+    # Input field names CONFIRMED from the actor's official docs
+    # (earlier guessed names like company_url/sort_type were wrong and
+    # made the actor reject every run, silently triggering the 10-post
+    # fallback):
+    #   linkedinUrl (required), maxPosts (default 500), sortBy
+    #   ("recent" = newest first), startPage
     primary_input = {
-        "company_url": company_url,
-        "sort_type":   "recent",
-        "limit":       35,
-        "start_page":  1,
+        "linkedinUrl": company_url,
+        "maxPosts":    35,
+        "sortBy":      "recent",
     }
     try:
         print(f"   🔄 Apify LinkedIn posts (primary, sort=recent): {company_handle}...")
@@ -1378,10 +1383,24 @@ def _classify_linkedin_post(post):
     format): Videos / Multi-Image / Single-Image / Documents / Polls /
     Text-Only / Other (Articles, Newsletters, Celebrations combined).
 
-    If a post is a pure repost with no attachments of its own, we look
-    at the shared_post's attachments instead, since that's the real
-    content being shown.
+    Handles BOTH actors' confirmed output shapes:
+    - brilliant_gum: "images" (array of URLs), "video" (object with
+      stream_url), "reshared" / "reshared_from"
+    - data-slayer:   "attachments" (array of typed objects),
+      "is_repost" / "shared_post"
     """
+    # ── brilliant_gum shape (confirmed from official docs) ──────────
+    video_obj = post.get("video")
+    if isinstance(video_obj, dict) and video_obj.get("stream_url"):
+        return "videos"
+    images = post.get("images")
+    if isinstance(images, list):
+        if len(images) >= 2:
+            return "multi_image"
+        if len(images) == 1:
+            return "single_image"
+
+    # ── data-slayer shape (attachments array) ───────────────────────
     attachments = post.get("attachments") or []
     if not attachments and post.get("is_repost") and isinstance(post.get("shared_post"), dict):
         attachments = post["shared_post"].get("attachments") or []
@@ -1521,11 +1540,27 @@ def fetch_linkedin(company_handle, brand_name=None):
 
         parsed = []
         for post in posts_raw:
-            likes    = _get_first(post, ["likes", "reactions", "likesCount", "reactionsCount"], 0) or 0
-            comments = _get_first(post, ["comments", "commentsCount"], 0) or 0
-            shares   = _get_first(post, ["shares", "reposts", "sharesCount", "repostsCount"])
+            # Field names cover BOTH actors: brilliant_gum (num_likes,
+            # num_comments, num_reposts, posted) and the data-slayer
+            # fallback (likes, comments, shares, created_at).
+            likes    = _get_first(post, ["num_likes", "likes", "reactions", "likesCount", "reactionsCount"], 0) or 0
+            comments = _get_first(post, ["num_comments", "comments", "commentsCount"], 0) or 0
+            shares   = _get_first(post, ["num_reposts", "shares", "reposts", "sharesCount", "repostsCount"])
             url      = _get_first(post, ["url", "postUrl", "linkedinUrl", "link"]) or "N/A"
-            ts       = _to_timestamp(_get_first(post, ["created_at", "time", "timestamp", "date", "publishedAt", "postedAt"]))
+
+            # Timestamp: try each candidate until one actually PARSES.
+            # A plain "first non-empty" pick would grab brilliant_gum's
+            # "time" field ("2 days ago" — a relative string), fail to
+            # parse it, and silently lose the date. "posted" (real UTC
+            # datetime) must win when present.
+            ts = None
+            for ts_field in ["posted", "created_at", "timestamp", "date", "publishedAt", "postedAt", "time"]:
+                candidate = post.get(ts_field)
+                if candidate not in (None, ""):
+                    ts = _to_timestamp(candidate)
+                    if ts is not None:
+                        break
+
             ptype    = _classify_linkedin_post(post)
             try: likes = int(likes)
             except: likes = 0
