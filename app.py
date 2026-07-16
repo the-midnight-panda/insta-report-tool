@@ -322,10 +322,22 @@ def _to_timestamp(val):
         return None
     try:
         if isinstance(val, (int, float)):
-            return float(val)
+            v = float(val)
+            # Millisecond-epoch detection: HarvestAPI (and some other
+            # APIs) send epoch MILLISECONDS. Read as seconds, those put
+            # posts in the year ~58509 and crash every date calculation
+            # (confirmed live: "ValueError: year 58509 is out of range").
+            # Any value above 1e11 seconds (~year 5138) can't be a real
+            # post date in seconds, so it must be milliseconds.
+            if v > 1e11:
+                v = v / 1000.0
+            return v
         s = str(val)
         if s.isdigit():
-            return float(s)
+            v = float(s)
+            if v > 1e11:
+                v = v / 1000.0
+            return v
 
         # Formats that already carry explicit timezone/offset info
         for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
