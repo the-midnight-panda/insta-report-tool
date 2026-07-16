@@ -1,205 +1,258 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Social Media Report Tool</title>
-  <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:'Segoe UI',sans-serif;background:#070f1f;color:#e0e6f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:50px 20px}
-    .label{font-size:11px;letter-spacing:3px;color:#d4af37;text-transform:uppercase;margin-bottom:12px}
-    h1{font-size:38px;font-weight:700;color:#fff;margin-bottom:8px;text-align:center}
-    .subtitle{font-size:14px;color:#7a8aaa;margin-bottom:36px;text-align:center}
-    .platforms{display:flex;gap:12px;margin-bottom:36px;flex-wrap:wrap;justify-content:center}
-    .pb{padding:8px 18px;border-radius:20px;font-size:13px;font-weight:600;border:1px solid}
-    .ig{background:#1a0a1a;border-color:#e1306c;color:#e1306c}
-    .fb{background:#0a1428;border-color:#1877f2;color:#1877f2}
-    .yt{background:#1a0a0a;border-color:#ff3b30;color:#ff3b30}
-    .li{background:#0a1a1a;border-color:#16a085;color:#16a085}
-    .card{background:#0e1e3a;border:1px solid #1e3058;border-radius:16px;padding:32px;width:100%;max-width:640px}
-    .field-label{font-size:11px;letter-spacing:2px;color:#7a8aaa;text-transform:uppercase;margin-bottom:8px}
-    input{width:100%;padding:14px 16px;background:#070f1f;border:1px solid #1e3058;border-radius:8px;color:#fff;font-size:15px;margin-bottom:8px;outline:none;transition:border .2s}
-    input:focus{border-color:#d4af37}
-    .hint{font-size:12px;color:#4a5a7a;margin-bottom:20px}
-    button{width:100%;padding:15px;background:#1a5aff;color:#fff;font-size:15px;font-weight:600;border:none;border-radius:8px;cursor:pointer;transition:background .2s}
-    button:hover{background:#1447cc}
-    button:disabled{background:#1e3058;color:#4a5a7a;cursor:not-allowed}
-    .stages{width:100%;max-width:640px;margin-top:24px;display:none}
-    .stage-card{background:#0e1e3a;border:1px solid #1e3058;border-radius:12px;padding:20px 24px;margin-bottom:12px}
-    .stage-row{display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid #1e3058;font-size:13px;color:#7a8aaa}
-    .stage-row:last-child{border-bottom:none}
-    .stage-row.done{color:#e0e6f0}
-    .icon{width:22px;text-align:center}
-    .found-handles{background:#0a1a0a;border:1px solid #2ecc71;border-radius:8px;padding:12px 16px;margin-top:10px;display:none;font-size:13px}
-    .handle-row{display:flex;align-items:center;gap:10px;padding:4px 0;color:#e0e6f0}
-    .result-card{background:#0e1e3a;border:1px solid #1e3058;border-radius:12px;padding:24px;margin-top:16px;display:none;width:100%;max-width:640px}
-    .result-card h3{color:#d4af37;font-size:15px;margin-bottom:14px}
-    .platform-section{margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #1e3058}
-    .platform-section:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
-    .platform-title{font-size:13px;font-weight:700;margin-bottom:8px}
-    .data-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px}
-    .data-key{color:#7a8aaa}
-    .data-val{color:#e0e6f0;text-align:right}
-    .download-btn{display:block;margin-top:20px;padding:14px;background:#d4af37;color:#070f1f;font-weight:700;font-size:15px;border-radius:8px;text-align:center;text-decoration:none}
-    .download-btn:hover{background:#c49b2f}
-    .error-msg{background:#2a0a0a;border:1px solid #5a1a1a;color:#ff6b6b;padding:14px 18px;border-radius:8px;margin-top:16px;font-size:14px;display:none;width:100%;max-width:640px}
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Social Media Report Tool</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0a1628;
+    color: #e8eaed;
+    min-height: 100vh;
+    padding: 40px 20px;
+  }
+
+  .container { max-width: 720px; margin: 0 auto; }
+
+  /* ── Platform chips ─────────────────────────────── */
+  .chips { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin-bottom: 36px; }
+  .chip {
+    padding: 8px 20px; border-radius: 999px; font-size: 14px; font-weight: 600;
+    border: 1px solid; background: rgba(255,255,255,0.03);
+  }
+  .chip.instagram { color: #e1478f; border-color: #a03366; }
+  .chip.facebook  { color: #4a90d9; border-color: #2d5a8a; }
+  .chip.youtube   { color: #e05252; border-color: #8a2d2d; }
+  .chip.linkedin  { color: #4ab08a; border-color: #2d6a52; }
+
+  /* ── Main input card ────────────────────────────── */
+  .card {
+    background: #10233f; border-radius: 14px; padding: 32px;
+    margin-bottom: 24px; border: 1px solid rgba(255,255,255,0.06);
+  }
+  .card label {
+    display: block; font-size: 12px; letter-spacing: 2px;
+    color: #8a9bb5; margin-bottom: 12px; font-weight: 600;
+  }
+  .card input {
+    width: 100%; padding: 16px 18px; font-size: 16px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.12); background: #0a1628; color: #e8eaed;
+    outline: none; transition: border-color 0.2s;
+  }
+  .card input:focus { border-color: #3b6fd4; }
+  .hint { font-size: 13px; color: #6b7c96; margin-top: 10px; }
+
+  button.generate {
+    width: 100%; margin-top: 22px; padding: 17px; font-size: 16px; font-weight: 700;
+    color: #fff; background: #2456e6; border: none; border-radius: 10px;
+    cursor: pointer; transition: background 0.2s;
+  }
+  button.generate:hover:not(:disabled) { background: #1c47c4; }
+  button.generate:disabled { background: #24365a; color: #6b7c96; cursor: not-allowed; }
+
+  /* ── Progress checklist ─────────────────────────── */
+  .progress { display: none; }
+  .progress.visible { display: block; }
+  .step { display: flex; align-items: center; gap: 12px; padding: 11px 4px; font-size: 15px; }
+  .step .icon {
+    width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .step.done .icon { background: #1d7a45; color: #fff; }
+  .step.active .icon { background: transparent; }
+  .step.active .icon::after {
+    content: ""; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid #3b6fd4; border-top-color: transparent;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Result & error boxes ───────────────────────── */
+  .result-box {
+    display: none; background: #10233f; border: 1px solid #1d7a45;
+    border-radius: 14px; padding: 28px; text-align: center; margin-bottom: 24px;
+  }
+  .result-box.visible { display: block; }
+  .result-box h2 { font-size: 20px; margin-bottom: 6px; color: #4ade80; }
+  .result-box p { color: #8a9bb5; font-size: 14px; margin-bottom: 20px; }
+  .result-box a.download {
+    display: inline-block; padding: 15px 36px; background: #1d7a45; color: #fff;
+    font-weight: 700; font-size: 16px; border-radius: 10px; text-decoration: none;
+    transition: background 0.2s;
+  }
+  .result-box a.download:hover { background: #166437; }
+
+  .error-box {
+    display: none; background: #2a1416; border: 1px solid #7a2d2d;
+    border-radius: 10px; padding: 16px 20px; color: #f0a0a0;
+    font-size: 14px; margin-bottom: 24px;
+  }
+  .error-box.visible { display: block; }
+</style>
 </head>
 <body>
+<div class="container">
 
-  <div class="label">Social Media Intelligence</div>
-  <h1>Brand Social Report Tool</h1>
-  <p class="subtitle">Enter any brand website → get a 14-slide multi-platform PPT report</p>
-
-  <div class="platforms">
-    <span class="pb ig">📸 Instagram</span>
-    <span class="pb fb">👥 Facebook</span>
-    <span class="pb yt">▶️ YouTube</span>
-    <span class="pb li">💼 LinkedIn</span>
+  <div class="chips">
+    <span class="chip instagram">&#128248; Instagram</span>
+    <span class="chip facebook">&#128101; Facebook</span>
+    <span class="chip youtube">&#9654;&#65039; YouTube</span>
+    <span class="chip linkedin">&#128188; LinkedIn</span>
   </div>
 
   <div class="card">
-    <div class="field-label">Brand Website URL</div>
-    <input type="text" id="websiteInput" placeholder="e.g. sporticoresorts.com or sunpure.in"/>
-    <p class="hint">We'll automatically find all social accounts from the website</p>
-    <button id="generateBtn" onclick="generate()">Generate Social Media Report</button>
+    <label>BRAND WEBSITE URL</label>
+    <input type="url" id="websiteUrl" placeholder="https://www.example.com/"
+           autocomplete="off" spellcheck="false">
+    <div class="hint">We'll automatically find all social accounts from the website</div>
+    <button class="generate" id="generateBtn" onclick="startGeneration()">Generate Social Media Report</button>
   </div>
 
-  <div class="stages" id="stages">
-    <div class="stage-card">
-      <div class="stage-row" id="s1"><span class="icon">→</span> Scanning website for social handles</div>
-      <div class="stage-row" id="s2"><span class="icon">→</span> Fetching Instagram profile data</div>
-      <div class="stage-row" id="s3"><span class="icon">→</span> Fetching Facebook page data</div>
-      <div class="stage-row" id="s4"><span class="icon">→</span> Fetching YouTube channel data</div>
-      <div class="stage-row" id="s5"><span class="icon">→</span> Fetching LinkedIn data</div>
-      <div class="stage-row" id="s6"><span class="icon">→</span> Analysing with Claude AI</div>
-      <div class="stage-row" id="s7"><span class="icon">→</span> Building 14-slide PowerPoint</div>
-    </div>
-    <div class="found-handles" id="foundHandles"></div>
+  <div class="card progress" id="progressCard"></div>
+
+  <div class="result-box" id="resultBox">
+    <h2 id="resultTitle">Report Ready</h2>
+    <p id="resultSubtitle"></p>
+    <a class="download" id="downloadLink" href="#" download>&#11015;&#65039; Download PowerPoint Report</a>
   </div>
 
-  <div class="result-card" id="resultCard">
-    <h3>📊 Report Generated Successfully</h3>
-    <div id="platformData"></div>
-    <a class="download-btn" id="downloadBtn" href="#">⬇ Download 14-Slide Social Media Report</a>
-  </div>
+  <div class="error-box" id="errorBox"></div>
 
-  <div class="error-msg" id="errorMsg"></div>
+</div>
 
-  <script>
-    async function generate() {
-      const input = document.getElementById("websiteInput").value.trim();
-      if (!input) { alert("Please enter a website URL!"); return; }
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   Frontend for the ASYNC JOB SYSTEM.
 
-      document.getElementById("stages").style.display = "block";
-      document.getElementById("resultCard").style.display = "none";
-      document.getElementById("errorMsg").style.display = "none";
-      document.getElementById("foundHandles").style.display = "none";
-      document.getElementById("generateBtn").disabled = true;
-      document.getElementById("generateBtn").textContent = "Generating...";
+   Old flow (what the previous index.html expected):
+     POST /generate  →  waits minutes  →  gets the full result
+   That broke once the backend went async: /generate now returns
+   only { job_id } instantly, so the old page read download_url as
+   undefined and built literal "/undefined" links.
 
-      const stages = ["s1","s2","s3","s4","s5","s6","s7"];
-      stages.forEach(id => {
-        document.getElementById(id).classList.remove("done");
-        document.getElementById(id).querySelector(".icon").textContent = "→";
-      });
+   New flow (this file):
+     1. POST /generate            → get { job_id } immediately
+     2. GET  /status/<job_id>     → poll every 2 seconds
+        - shows "steps" array as a live checklist
+        - status "running" → keep polling
+        - status "done"    → show download button (result fields
+                              are merged into the same response)
+        - status "error"   → show the error message
+   ═══════════════════════════════════════════════════════════════ */
 
-      let i = 0;
-      const interval = setInterval(() => {
-        if (i > 0) {
-          document.getElementById(stages[i-1]).querySelector(".icon").textContent = "✅";
-          document.getElementById(stages[i-1]).classList.add("done");
-        }
-        if (i < stages.length) {
-          document.getElementById(stages[i]).querySelector(".icon").textContent = "⏳";
-          i++;
-        } else clearInterval(interval);
-      }, 4000);
+let pollTimer = null;
 
-      try {
-        const res = await fetch("/generate", {
-          method: "POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({website_url: input})
-        });
+function el(id) { return document.getElementById(id); }
 
-        clearInterval(interval);
-        const result = await res.json();
-        if (!res.ok || result.error) throw new Error(result.error || "Something went wrong");
+function showError(msg) {
+  const box = el("errorBox");
+  box.textContent = "\u274C " + msg;
+  box.classList.add("visible");
+}
 
-        stages.forEach(id => {
-          document.getElementById(id).querySelector(".icon").textContent = "✅";
-          document.getElementById(id).classList.add("done");
-        });
+function clearUI() {
+  el("errorBox").classList.remove("visible");
+  el("resultBox").classList.remove("visible");
+  el("progressCard").classList.remove("visible");
+  el("progressCard").innerHTML = "";
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
 
-        // Show found handles
-        const handles = result.handles || {};
-        const hBox = document.getElementById("foundHandles");
-        const found = [
-          ["📸", "instagram"],
-          ["👥", "facebook"],
-          ["▶️", "youtube"],
-          ["💼", "linkedin"]
-        ].filter(([_, p]) => handles[p]);
+function renderSteps(steps, finished) {
+  const cardEl = el("progressCard");
+  cardEl.classList.add("visible");
+  cardEl.innerHTML = "";
+  steps.forEach((label, i) => {
+    const isLast = (i === steps.length - 1);
+    const div = document.createElement("div");
+    // Last step spins while the job is still running; all show ✓ when finished
+    div.className = "step " + ((!finished && isLast) ? "active" : "done");
+    div.innerHTML = '<span class="icon">' + ((!finished && isLast) ? "" : "\u2713") + "</span><span>" + label + "</span>";
+    cardEl.appendChild(div);
+  });
+}
 
-        hBox.innerHTML = "<strong style='color:#2ecc71'>✅ Social accounts found:</strong><br>" +
-          found.map(([icon, p]) =>
-            `<div class='handle-row'>${icon} &nbsp;<strong>${p}:</strong> &nbsp;${handles[p]}</div>`
-          ).join("");
-        hBox.style.display = "block";
+async function startGeneration() {
+  clearUI();
+  const url = el("websiteUrl").value.trim();
+  if (!url) { showError("Please enter a website URL"); return; }
 
-        // Show data per platform
-        const a   = result.analysis || {};
-        const ig  = a.instagram || {};
-        const fb  = a.facebook  || {};
-        const yt  = a.youtube   || {};
-        const li  = a.linkedin  || {};
+  const btn = el("generateBtn");
+  btn.disabled = true;
+  btn.textContent = "Starting...";
 
-        document.getElementById("platformData").innerHTML = `
-          <div class="platform-section">
-            <div class="platform-title" style="color:#e1306c">📸 Instagram — @${handles.instagram || 'N/A'}</div>
-            ${row("Followers",       ig.followers)}
-            ${row("Engagement Rate", ig.engagement_rate)}
-            ${row("Avg Likes/Post",  ig.avg_likes)}
-            ${row("Total Posts",     ig.posts)}
-          </div>
-          <div class="platform-section">
-            <div class="platform-title" style="color:#1877f2">👥 Facebook — ${handles.facebook || 'N/A'}</div>
-            ${row("Followers", fb.followers)}
-            ${row("Rating",    fb.rating)}
-            ${row("Category",  fb.category)}
-          </div>
-          <div class="platform-section">
-            <div class="platform-title" style="color:#ff3b30">▶️ YouTube — ${handles.youtube || 'N/A'}</div>
-            ${row("Subscribers",  yt.subscribers)}
-            ${row("Total Videos", yt.videos)}
-            ${row("Total Views",  yt.views)}
-          </div>
-          <div class="platform-section">
-            <div class="platform-title" style="color:#16a085">💼 LinkedIn — ${handles.linkedin || 'N/A'}</div>
-            ${row("Followers",  li.followers)}
-            ${row("Employees",  li.employees)}
-          </div>`;
+  let jobId;
+  try {
+    const resp = await fetch("/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ website_url: url })
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.job_id) {
+      throw new Error(data.error || "Could not start the report job");
+    }
+    jobId = data.job_id;
+  } catch (e) {
+    showError(e.message);
+    btn.disabled = false;
+    btn.textContent = "Generate Social Media Report";
+    return;
+  }
 
-        document.getElementById("downloadBtn").href = result.download_url;
-        document.getElementById("resultCard").style.display = "block";
+  btn.textContent = "Generating... (takes 2\u20134 minutes)";
+  renderSteps(["Starting up"], false);
 
-      } catch(err) {
-        clearInterval(interval);
-        document.getElementById("errorMsg").textContent = "❌ " + err.message;
-        document.getElementById("errorMsg").style.display = "block";
+  pollTimer = setInterval(async () => {
+    let data;
+    try {
+      const resp = await fetch("/status/" + jobId);
+      data = await resp.json();
+      // A non-OK response with a JSON error body (e.g. job expired, or
+      // the pipeline itself failed) is handled below via data.status /
+      // data.error rather than thrown, so the message reaches the user.
+    } catch (e) {
+      // Transient network hiccup — skip this poll, try again next tick.
+      return;
+    }
+
+    if (data.steps && data.steps.length > 0) {
+      renderSteps(data.steps, data.status === "done");
+    }
+
+    if (data.status === "done") {
+      clearInterval(pollTimer); pollTimer = null;
+
+      // Guard against the exact failure mode the old page had: never
+      // build a link from a missing value.
+      if (!data.download_url) {
+        showError("Report finished but no download link was returned \u2014 check the server logs.");
+      } else {
+        el("resultTitle").textContent = "\u2705 Report Ready" + (data.brand ? " \u2014 " + data.brand : "");
+        el("resultSubtitle").textContent = "Your PowerPoint report has been generated successfully.";
+        el("downloadLink").href = data.download_url;
+        el("resultBox").classList.add("visible");
       }
+      el("generateBtn").disabled = false;
+      el("generateBtn").textContent = "Generate Social Media Report";
 
-      document.getElementById("generateBtn").disabled = false;
-      document.getElementById("generateBtn").textContent = "Generate Social Media Report";
+    } else if (data.status === "error" || data.error) {
+      clearInterval(pollTimer); pollTimer = null;
+      showError(data.error || "Something went wrong while generating the report");
+      el("generateBtn").disabled = false;
+      el("generateBtn").textContent = "Generate Social Media Report";
     }
+    // status "starting" / "running" → just keep polling
+  }, 2000);
+}
 
-    function row(k, v) {
-      return `<div class="data-row">
-        <span class="data-key">${k}</span>
-        <span class="data-val">${v || 'N/A'}</span>
-      </div>`;
-    }
-  </script>
+// Allow pressing Enter in the input to start
+el("websiteUrl").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !el("generateBtn").disabled) startGeneration();
+});
+</script>
 </body>
 </html>
