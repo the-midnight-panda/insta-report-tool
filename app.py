@@ -1321,24 +1321,28 @@ def fetch_youtube_videos_via_api(channel_handle_or_id):
     """
     if not YOUTUBE_API_KEY:
         print("   ⚠️ No YOUTUBE_API_KEY set")
-        return []
+        return [], None
 
     raw = channel_handle_or_id.strip().lstrip("@")
 
     try:
         if raw.startswith("UC") and len(raw) >= 20:
-            ch_params = {"part": "contentDetails", "id": raw, "key": YOUTUBE_API_KEY}
+            ch_params = {"part": "snippet,contentDetails", "id": raw, "key": YOUTUBE_API_KEY}
         else:
-            ch_params = {"part": "contentDetails", "forHandle": raw, "key": YOUTUBE_API_KEY}
+            ch_params = {"part": "snippet,contentDetails", "forHandle": raw, "key": YOUTUBE_API_KEY}
         r = requests.get("https://www.googleapis.com/youtube/v3/channels", params=ch_params, timeout=30)
         items = r.json().get("items", [])
         if not items:
             print(f"   ⚠️ YouTube channel not found for: {channel_handle_or_id}")
-            return []
+            return [], None
         uploads_playlist_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        # Prefer the real, readable handle (e.g. "@kekahr") over a raw
+        # channel ID — some websites only expose the raw /channel/UC...
+        # URL, which otherwise ends up displayed as-is on the slide.
+        resolved_handle = items[0].get("snippet", {}).get("customUrl") or channel_handle_or_id
     except Exception as e:
         print(f"   ⚠️ YouTube channel resolution failed: {e}")
-        return []
+        return [], None
 
     try:
         r = requests.get("https://www.googleapis.com/youtube/v3/playlistItems", params={
@@ -1348,10 +1352,10 @@ def fetch_youtube_videos_via_api(channel_handle_or_id):
         video_ids = [item["contentDetails"]["videoId"] for item in r.json().get("items", [])]
         if not video_ids:
             print("   ⚠️ YouTube uploads playlist returned no videos")
-            return []
+            return [], resolved_handle
     except Exception as e:
         print(f"   ⚠️ YouTube playlist fetch failed: {e}")
-        return []
+        return [], resolved_handle
 
     try:
         r = requests.get("https://www.googleapis.com/youtube/v3/videos", params={
@@ -1360,10 +1364,10 @@ def fetch_youtube_videos_via_api(channel_handle_or_id):
         }, timeout=30)
         videos = r.json().get("items", [])
         print(f"   ✅ YouTube official API returned {len(videos)} videos")
-        return videos
+        return videos, resolved_handle
     except Exception as e:
         print(f"   ⚠️ YouTube video stats fetch failed: {e}")
-        return []
+        return [], resolved_handle
 
 
 def fetch_youtube(channel_id):
@@ -1403,7 +1407,12 @@ def fetch_youtube(channel_id):
     #    same metric machinery as Instagram/Facebook/LinkedIn. ────────
     try:
         subscribers_n = parse_num(data.get("subscribers", 0))
-        videos_raw = fetch_youtube_videos_via_api(channel_id)
+        videos_raw, resolved_handle = fetch_youtube_videos_via_api(channel_id)
+        if resolved_handle:
+            # Overwrite with the real, readable handle if the API found
+            # one — fixes cases where the website only exposed a raw
+            # /channel/UC... URL instead of a friendly @handle.
+            data["handle"] = resolved_handle
         print(f"   🔍 YouTube videos fetched: {len(videos_raw)}")
 
         parsed = []
@@ -1476,7 +1485,7 @@ def fetch_youtube(channel_id):
             "shorts_count": len(shorts_group),
             "videos_count": len(videos_group),
             "shorts": shorts_metrics,
-            "videos": videos_metrics,
+            "videos_performance": videos_metrics,
         })
         print(f"   ✅ {video_count} videos ({len(shorts_group)} shorts / {len(videos_group)} long-form) | ER: {eng_rate}")
     except Exception as e:
@@ -2284,7 +2293,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     branded_table(s, ["Platform","Handle","Followers","Key Metric","Status"], [
         ["Instagram", f"@{handles.get('instagram','N/A')}", ig_raw.get("followers","N/A"), f"ER: {ig_raw.get('engagement_rate','N/A')}", "Active" if handles.get("instagram") else "Not Found"],
         ["Facebook",  handles.get("facebook","N/A"),  fb_raw.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",       "Active" if handles.get("facebook") else "Not Found"],
-        ["YouTube",   handles.get("youtube","N/A"),   yt_raw.get("subscribers","N/A"), f"Videos: {yt_raw.get('videos','N/A')}", "Active" if handles.get("youtube") else "Not Found"],
+        ["YouTube",   handles.get("youtube","N/A"),   yt_raw.get("subscribers","N/A"), f"ER: {yt_raw.get('engagement_rate','N/A')}", "Active" if handles.get("youtube") else "Not Found"],
         ["LinkedIn",  handles.get("linkedin","N/A"),  li_raw.get("followers","N/A"), f"Employees: {li_raw.get('employees','N/A')}", "Active" if handles.get("linkedin") else "Not Found"],
     ], 0.55, 1.65, 12.23, 2.35, dark_bg=dark)
     card(s, 0.55, 4.35, 12.23, 2.15, "Overall Analysis", analysis.get("overall_summary",""), dark_bg=dark)
@@ -2529,10 +2538,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
 
     # ── SLIDE 12: YouTube Overview (light) ──────────────────────
     yt_shorts = yt_raw.get("shorts", {})
-    yt_videos = yt_raw.get("videos", {})
+    yt_videos = yt_raw.get("videos_performance", {})
     s, dark = start_slide(prs, blank, 12)
     kicker_header(s, "YouTube", "YouTube Overview",
-                  f"{handles.get('youtube','N/A')}  ·  Based on last {yt_raw.get('sample_size','N/A')} videos", dark_bg=dark)
+                  f"{yt_raw.get('handle', handles.get('youtube','N/A'))}  ·  Based on last {yt_raw.get('sample_size','N/A')} videos", dark_bg=dark)
 
     stat_block(s, 0.55, 1.75, 3.86, yt_raw.get("subscribers","N/A"), "Subscribers", size=54, dark_bg=dark)
     stat_block(s, 4.73, 1.75, 3.86, yt_raw.get("sample_size","N/A"), "Videos Analyzed", size=54, dark_bg=dark)
@@ -3016,9 +3025,10 @@ def debug_youtube(channel_handle):
     field names here are guaranteed correct (official Google docs) —
     this route mainly confirms channel handle resolution works."""
     try:
-        videos = fetch_youtube_videos_via_api(channel_handle)
+        videos, resolved_handle = fetch_youtube_videos_via_api(channel_handle)
         return jsonify({
             "total_videos_returned": len(videos),
+            "resolved_handle":       resolved_handle,
             "first_video_full":      videos[0] if videos else "no videos found",
             "second_video_full":     videos[1] if len(videos) > 1 else "n/a",
         })
