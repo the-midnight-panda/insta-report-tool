@@ -1400,7 +1400,30 @@ def _classify_linkedin_post(post):
     - data-slayer:   "attachments" (array of typed objects),
       "is_repost" / "shared_post"
     """
-    # ── brilliant_gum shape (confirmed from official docs) ──────────
+    # ── HarvestAPI shape (CONFIRMED from official docs:
+    #    postImages / postVideo / article / newsletterUrl / repost) ──
+    #    For pure reposts with no media of their own, classify by the
+    #    reposted content's media instead.
+    src = post
+    repost_obj = post.get("repost")
+    if isinstance(repost_obj, dict) and repost_obj:
+        has_own_media = (post.get("postImages") or post.get("postVideo") or post.get("article"))
+        if not has_own_media:
+            src = repost_obj
+
+    post_video = src.get("postVideo")
+    if isinstance(post_video, dict) and (post_video.get("videoUrl") or post_video.get("thumbnailUrl")):
+        return "videos"
+    post_images = src.get("postImages")
+    if isinstance(post_images, list) and len(post_images) > 0:
+        return "multi_image" if len(post_images) >= 2 else "single_image"
+    document_obj = src.get("document")
+    if isinstance(document_obj, dict) and document_obj:
+        return "documents"
+    if src.get("newsletterUrl") or (isinstance(src.get("article"), dict) and src.get("article")):
+        return "other"          # Articles & Newsletters
+
+    # ── brilliant_gum shape (images array / video object) ───────────
     video_obj = post.get("video")
     if isinstance(video_obj, dict) and video_obj.get("stream_url"):
         return "videos"
