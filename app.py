@@ -8,6 +8,7 @@ import io
 import time
 import threading
 import uuid
+import concurrent.futures
 from datetime import datetime, timezone
 from collections import Counter
 from dotenv import load_dotenv
@@ -1297,13 +1298,93 @@ def _parse_iso8601_duration(duration_str):
 
 def _classify_youtube_video(video):
     """
-    Two categories: Shorts vs. (long-form) Videos. Uses YouTube's
-    CURRENT official threshold — videos up to 3 minutes (180s) qualify
-    as Shorts (this was raised from the original 60-second limit).
+    FALLBACK ONLY — used when the live /shorts/ redirect check (below)
+    fails for a specific video, e.g. a network hiccup. This is NOT the
+    primary classification method anymore: duration alone is wrong,
+    because YouTube now allows Shorts up to 3 minutes long, but plenty
+    of normal landscape videos are also under 3 minutes and are NOT
+    Shorts (confirmed live: two TalkingLands videos at 2:24 and 2:22
+    are regular landscape uploads, not Shorts). Real classification
+    lives in _classify_youtube_videos_batch below.
     """
     duration_str = video.get("contentDetails", {}).get("duration", "")
     seconds = _parse_iso8601_duration(duration_str)
     return "shorts" if seconds <= 180 else "videos"
+
+
+def _check_is_short_via_redirect(video_id, timeout=6):
+    """
+    Asks YouTube itself whether a video is a Short — this is the real
+    fix for the duration-based misclassification bug.
+
+    How it works: every Short also has a URL at
+    https://www.youtube.com/shorts/{video_id}.
+      - YouTube serves that URL directly (status 200)  -> it IS a Short
+      - YouTube redirects it to /watch?v=... (30x)      -> it's a
+        regular Video, even if it happens to be short in length
+
+    This checks YouTube's own classification instead of guessing from
+    duration, which is what was misclassifying short landscape videos
+    (e.g. 2:22, 2:24 long) as Shorts.
+
+    Returns True (Short), False (Video), or None if the request itself
+    failed (network issue) — the caller falls back to duration only in
+    that None case, never as the default.
+    """
+    url = f"https://www.youtube.com/shorts/{video_id}"
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0"}
+    try:
+        r = requests.head(url, allow_redirects=False, timeout=timeout, headers=headers)
+        # A few edge servers respond oddly to HEAD — retry with GET
+        # once before giving up on this video.
+        if r.status_code not in (200, 301, 302, 303, 307, 308):
+            r = requests.get(url, allow_redirects=False, timeout=timeout, headers=headers)
+        if r.status_code == 200:
+            return True
+        if r.status_code in (301, 302, 303, 307, 308):
+            return False
+    except Exception as e:
+        print(f"   ⚠️ Shorts-check failed for {video_id}: {e}")
+    return None
+
+
+def _classify_youtube_videos_batch(videos, max_workers=10):
+    """
+    Classifies every video as Shorts vs Videos by checking YouTube's
+    real /shorts/{id} redirect behavior for each one, run CONCURRENTLY
+    so ~30 videos don't add ~30 sequential network round-trips to
+    report generation time.
+
+    Falls back to the old duration-based rule ONLY for a video whose
+    live check genuinely failed (e.g. a network hiccup) — never used
+    as the default/primary method anymore.
+    """
+    video_ids = [v.get("id","") for v in videos if v.get("id")]
+    redirect_results = {}
+    if video_ids:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_id = {executor.submit(_check_is_short_via_redirect, vid): vid
+                             for vid in video_ids}
+            for future in concurrent.futures.as_completed(future_to_id):
+                vid = future_to_id[future]
+                try:
+                    redirect_results[vid] = future.result()
+                except Exception:
+                    redirect_results[vid] = None
+
+    classifications = {}
+    fallback_used = 0
+    for v in videos:
+        vid = v.get("id", "")
+        is_short = redirect_results.get(vid)
+        if is_short is None:
+            classifications[vid] = _classify_youtube_video(v)
+            fallback_used += 1
+        else:
+            classifications[vid] = "shorts" if is_short else "videos"
+    if fallback_used:
+        print(f"   ⚠️ Shorts/Video: fell back to duration for {fallback_used} video(s) (live check failed)")
+    return classifications
 
 
 def fetch_youtube_videos_via_api(channel_handle_or_id):
@@ -1415,6 +1496,12 @@ def fetch_youtube(channel_id):
             data["handle"] = resolved_handle
         print(f"   🔍 YouTube videos fetched: {len(videos_raw)}")
 
+        # ── Classify ALL videos as Shorts vs. Videos in one concurrent
+        #    batch, using YouTube's real /shorts/ redirect check instead
+        #    of guessing from duration. Done once here, before the loop,
+        #    so the loop below is just a plain dict lookup per video. ──
+        yt_classifications = _classify_youtube_videos_batch(videos_raw)
+
         parsed = []
         for v in videos_raw:
             snippet = v.get("snippet", {}) or {}
@@ -1428,7 +1515,7 @@ def fetch_youtube(channel_id):
             video_id = v.get("id", "")
             url = f"https://www.youtube.com/watch?v={video_id}" if video_id else "N/A"
             ts = _to_timestamp(snippet.get("publishedAt"))
-            ptype = _classify_youtube_video(v)
+            ptype = yt_classifications.get(video_id, "videos")
             # No "shares" field exists anywhere in YouTube's official
             # API — genuinely doesn't exist, not a data gap on our end.
             parsed.append({
