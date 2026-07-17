@@ -23,10 +23,11 @@ load_dotenv()
 SEARCHAPI_KEY     = os.getenv("SEARCHAPI_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 APIFY_API_KEY     = os.getenv("APIFY_API_KEY")
+YOUTUBE_API_KEY   = os.getenv("YOUTUBE_API_KEY")
 
 app = Flask(__name__)
 
-TOTAL_SLIDES = 26
+TOTAL_SLIDES = 28
 
 # ═══════════════════════════════════════════════════════════════
 # MIDNIGHT PANDA BRAND DESIGN TOKENS
@@ -1276,6 +1277,95 @@ def fetch_facebook(username):
     return data
 
 
+def _parse_iso8601_duration(duration_str):
+    """
+    Parses YouTube's ISO 8601 duration format (e.g. "PT4M13S", "PT58S",
+    "PT1H2M3S") into total seconds. This is a real, stable, documented
+    format from Google's own API — no guessing required here, unlike
+    the scraper-based platforms.
+    """
+    if not duration_str:
+        return 0
+    match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str)
+    if not match:
+        return 0
+    hours   = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _classify_youtube_video(video):
+    """
+    Two categories: Shorts vs. (long-form) Videos. Uses YouTube's
+    CURRENT official threshold — videos up to 3 minutes (180s) qualify
+    as Shorts (this was raised from the original 60-second limit).
+    """
+    duration_str = video.get("contentDetails", {}).get("duration", "")
+    seconds = _parse_iso8601_duration(duration_str)
+    return "shorts" if seconds <= 180 else "videos"
+
+
+def fetch_youtube_videos_via_api(channel_handle_or_id):
+    """
+    Official YouTube Data API v3 — three-step fetch, all confirmed from
+    Google's own published documentation, not a reverse-engineered
+    scraper:
+      1. channels.list  -> resolve handle/ID to the channel's uploads
+                            playlist ID (costs 1 quota unit)
+      2. playlistItems.list -> list up to 35 recent video IDs from that
+                                playlist (costs 1 unit)
+      3. videos.list    -> batch-fetch full stats for those videos in
+                            ONE call (costs 1 unit, up to 50 IDs)
+    Total: ~3 units per report, against a 10,000/day free quota.
+    """
+    if not YOUTUBE_API_KEY:
+        print("   ⚠️ No YOUTUBE_API_KEY set")
+        return []
+
+    raw = channel_handle_or_id.strip().lstrip("@")
+
+    try:
+        if raw.startswith("UC") and len(raw) >= 20:
+            ch_params = {"part": "contentDetails", "id": raw, "key": YOUTUBE_API_KEY}
+        else:
+            ch_params = {"part": "contentDetails", "forHandle": raw, "key": YOUTUBE_API_KEY}
+        r = requests.get("https://www.googleapis.com/youtube/v3/channels", params=ch_params, timeout=30)
+        items = r.json().get("items", [])
+        if not items:
+            print(f"   ⚠️ YouTube channel not found for: {channel_handle_or_id}")
+            return []
+        uploads_playlist_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    except Exception as e:
+        print(f"   ⚠️ YouTube channel resolution failed: {e}")
+        return []
+
+    try:
+        r = requests.get("https://www.googleapis.com/youtube/v3/playlistItems", params={
+            "part": "contentDetails", "playlistId": uploads_playlist_id,
+            "maxResults": 35, "key": YOUTUBE_API_KEY
+        }, timeout=30)
+        video_ids = [item["contentDetails"]["videoId"] for item in r.json().get("items", [])]
+        if not video_ids:
+            print("   ⚠️ YouTube uploads playlist returned no videos")
+            return []
+    except Exception as e:
+        print(f"   ⚠️ YouTube playlist fetch failed: {e}")
+        return []
+
+    try:
+        r = requests.get("https://www.googleapis.com/youtube/v3/videos", params={
+            "part": "snippet,statistics,contentDetails",
+            "id": ",".join(video_ids), "key": YOUTUBE_API_KEY
+        }, timeout=30)
+        videos = r.json().get("items", [])
+        print(f"   ✅ YouTube official API returned {len(videos)} videos")
+        return videos
+    except Exception as e:
+        print(f"   ⚠️ YouTube video stats fetch failed: {e}")
+        return []
+
+
 def fetch_youtube(channel_id):
     print(f"▶️  Fetching YouTube: {channel_id}")
     data = {}
@@ -1308,6 +1398,92 @@ def fetch_youtube(channel_id):
             print(f"   ✅ {data['subscribers']} subscribers | {data['videos']} videos")
     except Exception as e:
         print(f"   ⚠️ YouTube failed: {e}")
+
+    # ── Videos via the OFFICIAL YouTube Data API v3 — reuses the exact
+    #    same metric machinery as Instagram/Facebook/LinkedIn. ────────
+    try:
+        subscribers_n = parse_num(data.get("subscribers", 0))
+        videos_raw = fetch_youtube_videos_via_api(channel_id)
+        print(f"   🔍 YouTube videos fetched: {len(videos_raw)}")
+
+        parsed = []
+        for v in videos_raw:
+            snippet = v.get("snippet", {}) or {}
+            stats   = v.get("statistics", {}) or {}
+            try: likes = int(stats.get("likeCount", 0) or 0)
+            except: likes = 0
+            try: comments = int(stats.get("commentCount", 0) or 0)
+            except: comments = 0
+            try: views = int(stats.get("viewCount", 0) or 0)
+            except: views = 0
+            video_id = v.get("id", "")
+            url = f"https://www.youtube.com/watch?v={video_id}" if video_id else "N/A"
+            ts = _to_timestamp(snippet.get("publishedAt"))
+            ptype = _classify_youtube_video(v)
+            # No "shares" field exists anywhere in YouTube's official
+            # API — genuinely doesn't exist, not a data gap on our end.
+            parsed.append({
+                "type": ptype, "likes": likes, "comments": comments,
+                "shares": None, "reposts": None, "views": views,
+                "url": url, "ts": ts,
+            })
+
+        posts_with_dates    = [pp for pp in parsed if pp["ts"] is not None]
+        posts_without_dates = [pp for pp in parsed if pp["ts"] is None]
+        posts_with_dates.sort(key=lambda pp: pp["ts"], reverse=True)
+        parsed = (posts_with_dates + posts_without_dates)[:30]
+
+        video_count = len(parsed)
+        shorts_group = [pp for pp in parsed if pp["type"] == "shorts"]
+        videos_group = [pp for pp in parsed if pp["type"] == "videos"]
+
+        total_l = sum(pp["likes"] for pp in parsed)
+        total_c = sum(pp["comments"] for pp in parsed)
+        engagement_total = total_l + total_c
+        eng_rate = f"{(engagement_total/video_count/subscribers_n*100):.2f}%" if (video_count and subscribers_n) else "N/A"
+
+        timestamps = [pp["ts"] for pp in parsed if pp["ts"]]
+        if len(timestamps) >= 2:
+            span_days = max((max(timestamps) - min(timestamps)) / 86400, 1)
+            posting_frequency = f"{(video_count / span_days * 7):.1f} / week"
+        else:
+            posting_frequency = "N/A"
+
+        day_dist      = compute_day_distribution(parsed)
+        hour_insights = compute_hour_insights(parsed)
+        consistency   = compute_posting_consistency(parsed)
+        momentum      = compute_momentum(parsed)
+
+        # is_reels=True for BOTH groups — unlike Instagram/Facebook,
+        # every YouTube video (Short or long-form) has a real view
+        # count, so both categories get the view-based rate metrics.
+        shorts_metrics = _compute_group_metrics(shorts_group, subscribers_n, is_reels=True)
+        videos_metrics = _compute_group_metrics(videos_group, subscribers_n, is_reels=True)
+
+        data.update({
+            "sample_size":       video_count,
+            "engagement_rate":   eng_rate,
+            "engagement_total":  engagement_total,
+            "posting_frequency": posting_frequency,
+            "most_active_day":  day_dist["most_active_day"],
+            "least_active_day": day_dist["least_active_day"],
+            "most_frequent_hour":   hour_insights["most_frequent_hour"],
+            "best_performing_hour": hour_insights["best_performing_hour"],
+            "outlier_note":         hour_insights["outlier_note"],
+            "posting_consistency":  consistency,
+            "momentum_pct":         momentum["momentum_pct"],
+            "momentum_direction":   momentum["momentum_direction"],
+            "shorts_count": len(shorts_group),
+            "videos_count": len(videos_group),
+            "shorts": shorts_metrics,
+            "videos": videos_metrics,
+        })
+        print(f"   ✅ {video_count} videos ({len(shorts_group)} shorts / {len(videos_group)} long-form) | ER: {eng_rate}")
+    except Exception as e:
+        import traceback
+        print(f"   ⚠️ YouTube post-level fetch failed: {e}")
+        print(traceback.format_exc())
+
     return data
 
 
@@ -1732,6 +1908,13 @@ content format. Comment on posting_frequency vs LinkedIn's B2B best practice of
 2-3 posts/week. If sample_size is 0 or very low, say so plainly instead of inventing
 benchmarks from missing data.
 
+For the "youtube_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
+characters total) using the SAME benchmark bands as above, applied to the YOUTUBE
+DATA's engagement_rate field. Compare the "shorts" and "videos" objects — mention
+whichever format (Shorts vs long-form) has the higher engagement rate or view count
+as the stronger format. Comment on posting_frequency. If sample_size is 0 or very low,
+say so plainly instead of inventing benchmarks from missing data.
+
 Return ONLY a JSON object:
 {{
   "brand_name": "brand name",
@@ -1760,6 +1943,7 @@ Return ONLY a JSON object:
     "strength": "biggest strength",
     "recommendation": "one actionable tip"
   }},
+  "youtube_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
   "linkedin": {{
     "followers": "exact from data",
     "employees": "exact from data",
@@ -2343,42 +2527,122 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ], dark_bg=dark)
     footer_bar(s, 11, dark_bg=dark)
 
-    # ── SLIDE 12: YouTube Channel (light) ───────────────────────
+    # ── SLIDE 12: YouTube Overview (light) ──────────────────────
+    yt_shorts = yt_raw.get("shorts", {})
+    yt_videos = yt_raw.get("videos", {})
     s, dark = start_slide(prs, blank, 12)
-    kicker_header(s, "YouTube", "YouTube Channel", handles.get('youtube','N/A'), dark_bg=dark)
-    tb(s, str(yt.get("description_summary","") or yt_raw.get("description",""))[:220],
-       0.55, 1.62, 12.23, 0.55, size=12.5, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
-    stat_block(s, 0.55, 2.50, 3.86, yt_raw.get("subscribers","N/A"), "Subscribers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 2.50, 3.86, yt_raw.get("videos","N/A"), "Total Videos", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 2.50, 3.86, yt_raw.get("views","N/A"), "Total Views", size=54, dark_bg=dark)
-    stat_block(s, 0.55, 3.85, 3.86, yt_raw.get("is_verified","No"), "Verified", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.85, 3.86, yt_raw.get("joined","N/A"), "Joined Date", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.85, 3.86, "YouTube", "Platform", size=32, dark_bg=dark)
-    card(s, 0.55, 5.35, 12.23, 1.15, "Reach Signal", yt.get("strength",""), dark_bg=dark)
+    kicker_header(s, "YouTube", "YouTube Overview",
+                  f"{handles.get('youtube','N/A')}  ·  Based on last {yt_raw.get('sample_size','N/A')} videos", dark_bg=dark)
+
+    stat_block(s, 0.55, 1.75, 3.86, yt_raw.get("subscribers","N/A"), "Subscribers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, yt_raw.get("sample_size","N/A"), "Videos Analyzed", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, yt_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
+    stat_block(s, 0.55, 3.15, 3.86, yt_raw.get("engagement_rate","N/A"), "Engagement Rate / Subscriber", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.15, 3.86, yt_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.15, 3.86, yt_raw.get("views","N/A"), "Total Views (All-Time)", size=32, dark_bg=dark)
+
+    yt_divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+    ln12 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
+    ln12.fill.solid(); ln12.fill.fore_color.rgb = yt_divider_color; ln12.line.fill.background()
+
+    yt_sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
+    tb(s, f"Most Frequent Hour: {yt_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {yt_raw.get('best_performing_hour','N/A')}",
+       0.55, 4.24, 12.23, 0.24, size=12, color=yt_sub_color, font=FONT_MONO_LT)
+    tb(s, f"Posting Consistency: {yt_raw.get('posting_consistency','N/A')}",
+       0.55, 4.50, 5.95, 0.24, size=12, color=yt_sub_color, font=FONT_MONO_LT)
+
+    yt_momentum_direction = yt_raw.get("momentum_direction")
+    yt_momentum_pct       = yt_raw.get("momentum_pct", "N/A")
+    if yt_momentum_direction == "up":
+        yt_momentum_color, yt_momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {yt_momentum_pct}"
+    elif yt_momentum_direction == "down":
+        yt_momentum_color, yt_momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {yt_momentum_pct}"
+    else:
+        yt_momentum_color, yt_momentum_text = yt_sub_color,   f"Momentum: {yt_momentum_pct}"
+    tb(s, yt_momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=yt_momentum_color, font=FONT_MONO_MED)
+
+    yt_analysis_text = truncate_to_sentence(analysis.get("youtube_analysis",""), max_chars=480)
+    card(s, 0.55, 4.86, 12.23, 1.55, "YouTube Analysis", yt_analysis_text, dark_bg=dark)
+
+    tb(s, f"Most Active Day: {yt_raw.get('most_active_day','N/A')}   ·   Least Active Day: {yt_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
+       0.55, 6.50, 12.23, 0.22, size=11, color=yt_sub_color, font=FONT_MONO_LT)
+
+    yt_outlier_note = yt_raw.get("outlier_note")
+    if yt_outlier_note:
+        tb(s, yt_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
+
     footer_bar(s, 12, dark_bg=dark)
 
-    # ── SLIDE 13: YouTube Insights (dark) ───────────────────────
+    # ── SLIDE 13: YouTube Content Strategy — Shorts vs Videos ───
     s, dark = start_slide(prs, blank, 13)
-    kicker_header(s, "YouTube", "Channel Insights", "Channel performance and strategic analysis", dark_bg=dark)
-    branded_table(s, ["Metric","Value"], [
-        ["Subscribers",  yt_raw.get("subscribers","N/A")],
-        ["Total Videos", yt_raw.get("videos","N/A")],
-        ["Total Views",  yt_raw.get("views","N/A")],
-        ["Channel Age",  yt_raw.get("joined","N/A")],
-    ], 0.55, 1.65, 5.60, 2.75, dark_bg=dark)
+    kicker_header(s, "YouTube", "Content Strategy",
+                  f"Content mix from the last {yt_raw.get('sample_size',30)} videos", dark_bg=dark)
+    yt_shorts_c = yt_raw.get("shorts_count",0); yt_videos_c = yt_raw.get("videos_count",0)
+    yt_total = max(yt_shorts_c + yt_videos_c, 1)
+    yt_cd = ChartData()
+    yt_cd.categories = ["Shorts","Videos"]
+    yt_cd.add_series("Videos",(yt_shorts_c, yt_videos_c))
+    yt_chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.85),Inches(5.40),Inches(4.50),yt_cd).chart
+    yt_chart.has_legend = True
+    for i, col in enumerate([GOLD, CARD_DARK if not dark else RGBColor(0x3A,0x3A,0x3A)]):
+        pt = yt_chart.plots[0].series[0].points[i]
+        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
+    for lbl, cnt, y in [("Shorts",yt_shorts_c,2.60),("Videos",yt_videos_c,4.00)]:
+        pct = int(round(cnt/yt_total*100))
+        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} video{'s' if cnt != 1 else ''}", size=40, dark_bg=dark)
+    footer_bar(s, 13, dark_bg=dark)
+
+    # ── SLIDE 14: Shorts Performance (light) ────────────────────
+    s, dark = start_slide(prs, blank, 14)
+    kicker_header(s, "YouTube — Shorts", "Shorts Performance",
+                  f"Based on {yt_shorts.get('n',0)} Shorts from the last {yt_raw.get('sample_size',30)}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, yt_shorts.get("avg_engagement","N/A"), "Avg Engagement / Short", size=40, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, yt_shorts.get("er_per_follower","N/A"), "Engagement Rate / Subscriber", size=40, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, yt_shorts.get("avg_views","N/A"), "Avg Views / Short", size=40, dark_bg=dark)
+    stat_block(s, 0.55, 2.95, 3.86, yt_shorts.get("avg_likes","N/A"), "Avg Likes / Short", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 2.95, 3.86, yt_shorts.get("avg_comments","N/A"), "Avg Comments / Short", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 2.95, 3.86, yt_shorts.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 4.05, 3.86, yt_shorts.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 4.05, 3.86, yt_shorts.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 4.05, 3.86, yt_shorts.get("n",0), "Shorts in Sample", size=28, dark_bg=dark)
+    link_list_card(s, 0.55, 5.15, 12.23, 0.92, "Top / Worst / Max Views", [
+        (f"Top Short (score {yt_shorts.get('top_score','N/A')}):  ",     yt_shorts.get("top_url","N/A")),
+        (f"Worst Short (score {yt_shorts.get('worst_score','N/A')}):  ", yt_shorts.get("worst_url","N/A")),
+        (f"Max views ({yt_shorts.get('max_views','N/A')}):  ",           yt_shorts.get("max_views_url","N/A")),
+    ], dark_bg=dark)
+    footer_bar(s, 14, dark_bg=dark)
+
+    # ── SLIDE 15: Videos (long-form) Performance (dark) ─────────
+    s, dark = start_slide(prs, blank, 15)
+    kicker_header(s, "YouTube — Videos", "Videos Performance",
+                  f"Based on {yt_videos.get('n',0)} long-form videos from the last {yt_raw.get('sample_size',30)}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, yt_videos.get("avg_engagement","N/A"), "Avg Engagement / Video", size=40, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, yt_videos.get("er_per_follower","N/A"), "Engagement Rate / Subscriber", size=40, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, yt_videos.get("avg_views","N/A"), "Avg Views / Video", size=40, dark_bg=dark)
+    stat_block(s, 0.55, 2.95, 3.86, yt_videos.get("avg_likes","N/A"), "Avg Likes / Video", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 2.95, 3.86, yt_videos.get("avg_comments","N/A"), "Avg Comments / Video", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 2.95, 3.86, yt_videos.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 4.05, 3.86, yt_videos.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 4.05, 3.86, yt_videos.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 4.05, 3.86, yt_videos.get("n",0), "Videos in Sample", size=28, dark_bg=dark)
+    link_list_card(s, 0.55, 5.15, 12.23, 0.92, "Top / Worst / Max Views", [
+        (f"Top video (score {yt_videos.get('top_score','N/A')}):  ",     yt_videos.get("top_url","N/A")),
+        (f"Worst video (score {yt_videos.get('worst_score','N/A')}):  ", yt_videos.get("worst_url","N/A")),
+        (f"Max views ({yt_videos.get('max_views','N/A')}):  ",           yt_videos.get("max_views_url","N/A")),
+    ], dark_bg=dark)
+    # vpv_str (Views Per Video, all-time estimate) is still needed by
+    # the Engagement Benchmarks table further down — kept from the old
+    # slide 13 logic so that reference doesn't break.
     try:
         vpv = int(str(yt_raw.get("views","0")).replace(",","")) // max(int(str(yt_raw.get("videos","1")).replace(",","")),1)
         vpv_str = f"{vpv:,}"
     except:
         vpv_str = "N/A"
-    stat_block(s, 0.55, 4.75, 5.60, vpv_str, "Views Per Video (Est.)", size=54, dark_bg=dark)
-    card(s, 6.75, 1.65, 5.70, 1.75, "Strength", yt.get("strength","N/A"), dark_bg=dark)
-    card(s, 6.75, 3.60, 5.70, 2.35, "Recommendation", yt.get("recommendation","N/A"), dark_bg=dark)
-    footer_bar(s, 13, dark_bg=dark)
+    footer_bar(s, 15, dark_bg=dark)
 
-    # ── SLIDE 14: LinkedIn Overview (light) ─────────────────────
+    # ── SLIDE 16: LinkedIn Overview (light) ─────────────────────
     li_categories = li_raw.get("categories", {})
-    s, dark = start_slide(prs, blank, 14)
+    s, dark = start_slide(prs, blank, 16)
     kicker_header(s, "LinkedIn", "LinkedIn Overview",
                   f"{handles.get('linkedin','N/A')}  ·  Based on last {li_raw.get('sample_size','N/A')} posts", dark_bg=dark)
 
@@ -2419,10 +2683,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     if li_outlier_note:
         tb(s, li_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
 
-    footer_bar(s, 14, dark_bg=dark)
+    footer_bar(s, 16, dark_bg=dark)
 
-    # ── SLIDE 15: LinkedIn Content Strategy — 7-category pie ────
-    s, dark = start_slide(prs, blank, 15)
+    # ── SLIDE 17: LinkedIn Content Strategy — 7-category pie ────
+    s, dark = start_slide(prs, blank, 17)
     kicker_header(s, "LinkedIn", "Content Strategy",
                   f"Content mix from the last {li_raw.get('sample_size',30)} posts", dark_bg=dark)
 
@@ -2465,19 +2729,19 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
            size=13, color=GOLD, font=FONT_MONO_MED)
         li_list_y += 0.44
 
-    footer_bar(s, 15, dark_bg=dark)
+    footer_bar(s, 17, dark_bg=dark)
 
-    # ── SLIDES 16-22: LinkedIn Performance — one per content type ──
+    # ── SLIDES 18-24: LinkedIn Performance — one per content type ──
     li_sample_size = li_raw.get("sample_size", 30)
     for i, (key, label) in enumerate(li_cat_order):
         linkedin_performance_slide(
-            prs, blank, 16 + i, label,
+            prs, blank, 18 + i, label,
             li_categories.get(key, {"n": 0}),
             li_sample_size
         )
 
-    # ── SLIDE 23: Cross-Platform Comparison (dark) ──────────────
-    s, dark = start_slide(prs, blank, 23)
+    # ── SLIDE 25: Cross-Platform Comparison (dark) ──────────────
+    s, dark = start_slide(prs, blank, 25)
     kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=dark)
     ig_f = parse_num(ig_raw.get("followers",0)); fb_f = parse_num(fb_raw.get("followers",0))
     yt_f = parse_num(yt_raw.get("subscribers",0)); li_f = parse_num(li_raw.get("followers",0))
@@ -2501,10 +2765,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ("LinkedIn",  li_raw.get("followers","N/A")),
     ]):
         stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=dark)
-    footer_bar(s, 23, dark_bg=dark)
+    footer_bar(s, 25, dark_bg=dark)
 
-    # ── SLIDE 24: Engagement Benchmarks (light) ─────────────────
-    s, dark = start_slide(prs, blank, 24)
+    # ── SLIDE 26: Engagement Benchmarks (light) ─────────────────
+    s, dark = start_slide(prs, blank, 26)
     kicker_header(s, "Benchmarks", "Engagement Benchmarks",
                   "Performance metrics vs. industry standards", dark_bg=dark)
     def er_status(val):
@@ -2518,15 +2782,15 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ["Instagram","Posting Frequency", ig_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
         ["Facebook", "Engagement Rate",   fb_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(fb_raw.get("engagement_rate","0"))],
         ["Facebook", "Posting Frequency", fb_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
-        ["YouTube",  "Subscribers",       yt_raw.get("subscribers","N/A"),           "Varies by niche",    "—"],
+        ["YouTube",  "Engagement Rate",   yt_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(yt_raw.get("engagement_rate","0"))],
         ["YouTube",  "Views / Video",     vpv_str,                                   ">1,000 is good",     "—"],
         ["LinkedIn", "Engagement Rate",   li_raw.get("engagement_rate","N/A"),       ">2% is good (B2B)",  er_status(li_raw.get("engagement_rate","0"))],
         ["LinkedIn", "Posting Frequency", li_raw.get("posting_frequency","N/A"),     "2–3 / week",         "—"],
     ], 0.55, 1.65, 12.23, 4.90, dark_bg=dark)
-    footer_bar(s, 24, dark_bg=dark)
+    footer_bar(s, 26, dark_bg=dark)
 
-    # ── SLIDE 25: Strengths & Gaps (dark) ───────────────────────
-    s, dark = start_slide(prs, blank, 25)
+    # ── SLIDE 27: Strengths & Gaps (dark) ───────────────────────
+    s, dark = start_slide(prs, blank, 27)
     kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps",
                   "What's working, and what needs attention", dark_bg=dark)
     card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",  cp.get("strongest_platform","N/A"),  dark_bg=dark)
@@ -2534,10 +2798,10 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
     card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",  cp.get("growth_opportunity","N/A"),  dark_bg=dark)
     card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",    analysis.get("overall_summary","N/A"), dark_bg=dark)
-    footer_bar(s, 25, dark_bg=dark)
+    footer_bar(s, 27, dark_bg=dark)
 
-    # ── SLIDE 26: Recommendations (light) ───────────────────────
-    s, dark = start_slide(prs, blank, 26)
+    # ── SLIDE 28: Recommendations (light) ───────────────────────
+    s, dark = start_slide(prs, blank, 28)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
     tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65,
        size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
@@ -2550,7 +2814,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=dark)
     tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Apify + Claude AI",
        0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
-    footer_bar(s, 26, dark_bg=dark)
+    footer_bar(s, 28, dark_bg=dark)
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
@@ -2744,6 +3008,22 @@ def debug_repost():
         "requested_url": post_url,
         "metrics_found": results.get(post_url) or results,
     })
+
+@app.route("/debug_youtube/<channel_handle>")
+def debug_youtube(channel_handle):
+    """Run this to verify the official YouTube API is fetching real
+    videos for a given channel. Unlike Instagram/Facebook/LinkedIn,
+    field names here are guaranteed correct (official Google docs) —
+    this route mainly confirms channel handle resolution works."""
+    try:
+        videos = fetch_youtube_videos_via_api(channel_handle)
+        return jsonify({
+            "total_videos_returned": len(videos),
+            "first_video_full":      videos[0] if videos else "no videos found",
+            "second_video_full":     videos[1] if len(videos) > 1 else "n/a",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/debug_linkedin/<company_handle>")
 def debug_linkedin(company_handle):
