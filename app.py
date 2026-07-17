@@ -28,7 +28,7 @@ YOUTUBE_API_KEY   = os.getenv("YOUTUBE_API_KEY")
 
 app = Flask(__name__)
 
-TOTAL_SLIDES = 28
+TOTAL_SLIDES = 40
 
 # ═══════════════════════════════════════════════════════════════
 # MIDNIGHT PANDA BRAND DESIGN TOKENS
@@ -393,7 +393,8 @@ def compute_day_distribution(parsed):
             counts[weekday] += 1
 
     if not counts:
-        return {"most_active_day": "N/A", "least_active_day": "N/A"}
+        return {"most_active_day": "N/A", "least_active_day": "N/A",
+                "best_performing_day": "N/A"}
 
     most_active_day = max(counts, key=counts.get)
     zero_days = [d for d in day_names if d not in counts]
@@ -402,7 +403,25 @@ def compute_day_distribution(parsed):
     else:
         least_active_day = min(counts, key=counts.get)
 
-    return {"most_active_day": most_active_day, "least_active_day": least_active_day}
+    # ── Best performing day: highest AVERAGE engagement per weekday.
+    #    Requires 2+ posts on that weekday to qualify (same anti-fluke
+    #    rule as best_performing_hour); falls back to the single best
+    #    day if nothing qualifies. ─────────────────────────────────────
+    day_posts = {}
+    for p in parsed:
+        if p["ts"]:
+            wd = datetime.fromtimestamp(p["ts"], tz=timezone.utc).strftime("%A")
+            day_posts.setdefault(wd, []).append(p)
+    qualifying = {d: ps for d, ps in day_posts.items() if len(ps) >= 2}
+    pool = qualifying if qualifying else day_posts
+    if pool:
+        best_performing_day = max(pool, key=lambda d: sum(_score(pp) for pp in pool[d]) / len(pool[d]))
+    else:
+        best_performing_day = "N/A"
+
+    return {"most_active_day": most_active_day,
+            "least_active_day": least_active_day,
+            "best_performing_day": best_performing_day}
 
 def _score(p):
     return p["likes"] + p["comments"] + (p["shares"] or 0) + (p["reposts"] or 0)
@@ -578,6 +597,11 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
 
     avg_engagement  = (total_likes + total_comments + total_shares + total_reposts) / n
     er_per_follower = (total_likes + total_comments) / n / followers * 100 if followers else 0
+    # Estimated ER: measured rate + 10% uplift to account for shares and
+    # saves that platforms don't expose publicly. Shown on format slides
+    # and used by the analysis; the uplift itself is NOT explained on the
+    # slide (per client feedback) — it lives only here in the code.
+    er_estimated = er_per_follower * 1.10
 
     scored = sorted(posts_group, key=_score, reverse=True)
     top    = scored[0]
@@ -587,6 +611,7 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
         "n":               n,
         "avg_engagement":  round(avg_engagement, 1),
         "er_per_follower": f"{er_per_follower:.2f}%",
+        "er_estimated":    f"{er_estimated:.2f}%",
         "avg_likes":       _smart_round(total_likes / n),
         "avg_comments":    _smart_round(total_comments / n),
         "avg_shares":      _smart_round(total_shares / n) if shares_known else "N/A",
@@ -1111,6 +1136,8 @@ def fetch_instagram(username):
 
             "most_active_day":  day_dist["most_active_day"],
             "least_active_day": day_dist["least_active_day"],
+            "best_performing_day": day_dist["best_performing_day"],
+            "avg_engagement": round(engagement_total / post_count, 1) if post_count else "N/A",
 
             "avatar_url": avatar_url,
 
@@ -1252,6 +1279,8 @@ def fetch_facebook(username):
 
             "most_active_day":  day_dist["most_active_day"],
             "least_active_day": day_dist["least_active_day"],
+            "best_performing_day": day_dist["best_performing_day"],
+            "avg_engagement": round(engagement_total / post_count, 1) if post_count else "N/A",
 
             "most_frequent_hour":   hour_insights["most_frequent_hour"],
             "best_performing_hour": hour_insights["best_performing_hour"],
@@ -1563,6 +1592,10 @@ def fetch_youtube(channel_id):
             "posting_frequency": posting_frequency,
             "most_active_day":  day_dist["most_active_day"],
             "least_active_day": day_dist["least_active_day"],
+            "best_performing_day": day_dist["best_performing_day"],
+            "avg_engagement": round(engagement_total / video_count, 1) if video_count else "N/A",
+            "avg_views_sample": (f"{sum((pp['views'] or 0) for pp in parsed) // video_count:,}"
+                                  if video_count else "N/A"),
             "most_frequent_hour":   hour_insights["most_frequent_hour"],
             "best_performing_hour": hour_insights["best_performing_hour"],
             "outlier_note":         hour_insights["outlier_note"],
@@ -1935,6 +1968,8 @@ def fetch_linkedin(company_handle, brand_name=None):
             "posting_frequency": posting_frequency,
             "most_active_day":  day_dist["most_active_day"],
             "least_active_day": day_dist["least_active_day"],
+            "best_performing_day": day_dist["best_performing_day"],
+            "avg_engagement": round(engagement_total / post_count, 1) if post_count else "N/A",
             "most_frequent_hour":   hour_insights["most_frequent_hour"],
             "best_performing_hour": hour_insights["best_performing_hour"],
             "outlier_note":         hour_insights["outlier_note"],
@@ -1960,11 +1995,12 @@ def analyse_with_claude(website_url, handles, ig, fb, yt, li):
     print("\n🤖 Sending all data to Claude...")
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = f"""
-You are a social media analyst. Analyse this brand's social media presence.
+You are a social media analyst writing slide copy for a branded report. Analyse this
+brand's social media presence.
 
 Website: {website_url}
 
-INSTAGRAM DATA (includes overall stats plus per-format breakdown for Images, Carousels, Reels):
+INSTAGRAM DATA (overall stats plus per-format breakdown for Images, Carousels, Reels):
 {json.dumps(ig, indent=2)}
 
 FACEBOOK DATA:
@@ -1976,92 +2012,77 @@ YOUTUBE DATA:
 LINKEDIN DATA:
 {json.dumps(li, indent=2)}
 
-For the "instagram_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
-characters total — this must fit in a fixed-size slide card, so be concise) using these
-industry benchmark bands for Engagement Rate:
-- Under 1% = Low engagement
-- 1% to 3.5% = Average / healthy
-- 3.5% to 6% = Good
-- 6%+ = Excellent
-Reference the account's engagement_rate against this scale, compare Reels engagement vs
-overall engagement, and comment on posting_frequency vs the general best-practice of
-3-5 posts per week. Be specific and use the real numbers, but stay concise — no filler
-sentences, no repeated points.
+WRITING RULES (apply to EVERY *_analysis / *_summary field):
+- 2-3 sentences, strict maximum ~420 characters (fixed-size slide cards).
+- Use the REAL numbers from the data. Never invent numbers. Never write N/A if data exists.
+- If a platform's sample_size is 0 or missing, say so plainly instead of inventing analysis.
+- Benchmark bands for Engagement Rate per follower: under 1% = Low; 1-3.5% = Average/healthy;
+  3.5-6% = Good; 6%+ = Excellent. Compare rates against the brand's industry/category norms
+  where you know them. YouTube uses engagement-by-VIEW: ~2% average; 5%+ typical for Shorts;
+  2-5% typical for long-form.
+- "er_estimated" fields already include a 10% uplift for shares/saves — use the estimated
+  rate when analysing Images/Carousels/Photos, but do NOT explain how it is calculated.
+- Overview analyses must cover: posting_frequency vs best practice (IG/FB 3-5/week,
+  LinkedIn 2-3/week), posting_consistency, a suggestion to post at best_performing_hour,
+  and the video-format engagement vs the category's market standard.
+- Content-strategy analyses must say what the brand posts MOST and whether that matches
+  where the engagement is. For LinkedIn, ignore the "other" category in this judgement.
+- Comparison analyses must name which format works best (highest er_per_follower) and call
+  out anything unusual vs standard behaviour (e.g. unusually high shares).
+- Deep-dive analyses must compare engagement rate BY VIEW to the industry standard for this
+  brand's category and give one concrete fix.
 
-For the "facebook_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
-characters total) using the SAME benchmark bands as above, but applied to the FACEBOOK
-DATA's engagement_rate and engagement_rate_videos fields instead. Compare video
-engagement vs overall engagement, and comment on Facebook's posting_frequency vs the
-3-5 posts/week best practice. If Facebook's sample_size is 0 or very low, say so plainly
-instead of inventing benchmarks from missing data.
-
-For the "linkedin_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
-characters total) using the SAME benchmark bands as above, applied to the LINKEDIN
-DATA's engagement_rate field. LinkedIn's "categories" object breaks posts into videos,
-multi_image, single_image, documents, polls, text_only, and other — mention whichever
-category has the most posts or the highest engagement as the account's strongest
-content format. Comment on posting_frequency vs LinkedIn's B2B best practice of
-2-3 posts/week. If sample_size is 0 or very low, say so plainly instead of inventing
-benchmarks from missing data.
-
-For the "youtube_analysis" field, write EXACTLY 3 sentences (strict maximum ~420
-characters total) using the SAME benchmark bands as above, applied to the YOUTUBE
-DATA's engagement_rate field. Compare the "shorts" and "videos" objects — mention
-whichever format (Shorts vs long-form) has the higher engagement rate or view count
-as the stronger format. Comment on posting_frequency. If sample_size is 0 or very low,
-say so plainly instead of inventing benchmarks from missing data.
-
-Return ONLY a JSON object:
+Return ONLY a JSON object with EXACTLY these keys:
 {{
   "brand_name": "brand name",
   "niche": "3-5 words describing the brand",
-  "overall_summary": "2-3 sentence overview of their social media presence",
-  "instagram": {{
-    "strength": "biggest strength",
-    "recommendation": "one actionable tip"
+  "quick_overview": "3-4 sentences combining all platforms: which platform is primary and why, one line on each other platform",
+  "instagram": {{"strength": "biggest strength", "recommendation": "one actionable tip"}},
+  "instagram_analysis": "overview analysis per rules",
+  "instagram_content_analysis": "what they post most on Instagram",
+  "instagram_images_analysis": "images performance, use er_estimated",
+  "instagram_carousels_analysis": "carousels performance, use er_estimated",
+  "instagram_reels_analysis": "deep-dive: er_by_view vs category standard + one fix",
+  "instagram_comparison_analysis": "which of images/carousels/reels works best + unusual behaviour",
+  "instagram_summary": "overall Instagram verdict incl. momentum",
+  "facebook": {{"strength": "biggest strength", "recommendation": "one actionable tip"}},
+  "facebook_analysis": "overview analysis per rules",
+  "facebook_content_analysis": "what they post most on Facebook",
+  "facebook_photos_analysis": "photos performance, use er_estimated",
+  "facebook_videos_analysis": "deep-dive: er_by_view vs standard + one fix",
+  "facebook_comparison_analysis": "which of photos/videos/links works best",
+  "facebook_summary": "overall Facebook verdict incl. momentum",
+  "youtube": {{"strength": "biggest strength", "recommendation": "one actionable tip"}},
+  "youtube_analysis": "overview analysis per rules",
+  "youtube_content_analysis": "what they post most: shorts vs long-form",
+  "youtube_shorts_analysis": "deep-dive: shorts er_by_view vs standard + one fix",
+  "youtube_videos_analysis": "deep-dive: long-form er_by_view vs standard + one fix",
+  "youtube_comparison_analysis": "shorts vs videos: which wins on engagement by view vs reach, vs industry standard",
+  "linkedin": {{"strength": "biggest strength", "recommendation": "one actionable tip"}},
+  "linkedin_analysis": "overview analysis per rules",
+  "linkedin_content_analysis": "what they post most (ignore 'other')",
+  "linkedin_category_analyses": {{
+    "videos": "1-2 sentences", "multi_image": "1-2 sentences", "single_image": "1-2 sentences",
+    "documents": "1-2 sentences", "polls": "1-2 sentences", "text_only": "1-2 sentences",
+    "other": "1-2 sentences"
   }},
-  "instagram_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
-  "facebook": {{
-    "followers": "exact from data",
-    "category": "exact from data",
-    "rating": "exact from data",
-    "about": "1 sentence summary",
-    "strength": "biggest strength",
-    "recommendation": "one actionable tip"
-  }},
-  "facebook_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
-  "youtube": {{
-    "subscribers": "exact from data",
-    "videos": "exact from data",
-    "views": "exact from data",
-    "joined": "exact from data",
-    "description_summary": "1 sentence",
-    "strength": "biggest strength",
-    "recommendation": "one actionable tip"
-  }},
-  "youtube_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
-  "linkedin": {{
-    "followers": "exact from data",
-    "employees": "exact from data",
-    "summary": "1 sentence",
-    "strength": "biggest strength",
-    "recommendation": "one actionable tip"
-  }},
-  "linkedin_analysis": "EXACTLY 3 sentences, ~420 characters max, as instructed above",
+  "linkedin_comparison_analysis": "which format has max er_per_follower — conclude it works best",
+  "linkedin_summary": "overall LinkedIn verdict incl. momentum",
   "cross_platform": {{
-    "strongest_platform": "which platform performs best and why",
-    "weakest_platform": "which needs most work and why",
-    "overall_recommendation": "top priority action for the brand",
-    "content_consistency": "are they consistent across platforms?",
-    "growth_opportunity": "biggest growth opportunity"
-  }}
+    "strongest_platform": "which and why",
+    "weakest_platform": "which and why",
+    "content_consistency": "consistent across platforms?",
+    "growth_opportunity": "biggest growth opportunity",
+    "overall_recommendation": "top priority action"
+  }},
+  "cross_platform_summary": "3-4 sentences: all four platforms side by side, red flags included",
+  "overall_analysis": "3-4 sentences framed as: overall it's good right now, and here is what can be improved"
 }}
 Return ONLY JSON. No markdown. No explanation.
-Use EXACT numbers from data — never write N/A if data exists.
 """
     msg = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2200,
+        max_tokens=8000,
         messages=[{"role":"user","content":prompt}]
     )
     raw = msg.content[0].text.strip()
@@ -2072,8 +2093,22 @@ Use EXACT numbers from data — never write N/A if data exists.
 
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 4 — MIDNIGHT PANDA BRANDED PPT HELPERS
+# STEP 4 — MIDNIGHT PANDA BRANDED PPT HELPERS (REDESIGN)
 # ═══════════════════════════════════════════════════════════════
+
+# Logo files — put logo_white.png (for dark slides) and logo_black.png
+# (for light slides) inside a "static" folder next to app.py. If the
+# files are missing the brand mark falls back to the old dot design so
+# report generation never fails.
+LOGO_WHITE = os.path.join("static", "logo_white.png")
+LOGO_BLACK = os.path.join("static", "logo_black.png")
+
+def usfmt(n):
+    """US comma format: 87981 -> '87,981'. Leaves non-numeric values alone."""
+    try:
+        return f"{int(str(n).replace(',','')):,}"
+    except Exception:
+        return str(n)
 
 def bg(slide, prs, color):
     s = slide.shapes.add_shape(1, 0, 0, prs.slide_width, prs.slide_height)
@@ -2092,19 +2127,24 @@ def tb(slide, text, x, y, w, h, size=14, bold=False, color=TEXT_DARK,
         p.line_spacing = line_spacing
     return box
 
-def brand_mark(slide, dark_bg=False, top_right=False):
-    outer = TEXT_LIGHT if dark_bg else TEXT_DARK
-    inner = TEXT_DARK if dark_bg else TEXT_LIGHT
-    if top_right:
-        dot_xs = [10.05, 10.29]; text_x = 10.58
+def brand_mark(slide, dark_bg=False, top_right=True):
+    """Panda logo + MIDNIGHT PANDA name, identical location on every slide.
+    White logo on dark slides, black logo on light slides."""
+    color = TEXT_LIGHT if dark_bg else TEXT_DARK
+    logo  = LOGO_WHITE if dark_bg else LOGO_BLACK
+    lx = 10.10 if top_right else 0.55
+    if os.path.exists(logo):
+        slide.shapes.add_picture(logo, Inches(lx), Inches(0.40), height=Inches(0.36))
+        tb(slide, "MIDNIGHT PANDA", lx + 0.46, 0.44, 2.30, 0.32, size=9.5, color=color, font=FONT_MONO)
     else:
-        dot_xs = [0.55, 0.79];   text_x = 1.08
-    for ox in dot_xs:
-        c1 = slide.shapes.add_shape(9, Inches(ox), Inches(0.45), Inches(0.16), Inches(0.16))
-        c1.fill.solid(); c1.fill.fore_color.rgb = outer; c1.line.fill.background()
-        c2 = slide.shapes.add_shape(9, Inches(ox+0.05), Inches(0.50), Inches(0.05), Inches(0.05))
-        c2.fill.solid(); c2.fill.fore_color.rgb = inner; c2.line.fill.background()
-    tb(slide, "MIDNIGHT PANDA", text_x, 0.42, 2.20, 0.32, size=9.5, color=outer, font=FONT_MONO)
+        # Fallback: old dot mark, so a missing logo file never breaks a report
+        inner = TEXT_DARK if dark_bg else TEXT_LIGHT
+        for ox in [lx, lx + 0.24]:
+            c1 = slide.shapes.add_shape(9, Inches(ox), Inches(0.45), Inches(0.16), Inches(0.16))
+            c1.fill.solid(); c1.fill.fore_color.rgb = color; c1.line.fill.background()
+            c2 = slide.shapes.add_shape(9, Inches(ox+0.05), Inches(0.50), Inches(0.05), Inches(0.05))
+            c2.fill.solid(); c2.fill.fore_color.rgb = inner; c2.line.fill.background()
+        tb(slide, "MIDNIGHT PANDA", lx + 0.53, 0.42, 2.20, 0.32, size=9.5, color=color, font=FONT_MONO)
 
 def footer_bar(slide, page_num, dark_bg=False):
     line_color = RGBColor(0x2A,0x2A,0x2A) if dark_bg else RGBColor(0xD8,0xD5,0xCC)
@@ -2129,15 +2169,7 @@ def stat_block(slide, x, y, w, value, label, size=54, dark_bg=False):
     tb(slide, value, x, y, w, vh, size=size, color=GOLD, font=FONT_STAT)
     tb(slide, label.upper(), x, y+vh+0.05, w, 0.30, size=9.5, color=label_color, font=FONT_MONO)
 
-def pill(slide, x, y, text):
-    w, h = 1.90, 0.50
-    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
-    r.fill.solid(); r.fill.fore_color.rgb = CARD_DARK; r.line.fill.background()
-    try: r.adjustments[0] = 0.5
-    except: pass
-    tb(slide, text, x, y+0.09, w, 0.32, size=11, color=TEXT_LIGHT, font=FONT_MONO, align=PP_ALIGN.CENTER)
-
-def card(slide, x, y, w, h, label, body, dark_bg=False):
+def card(slide, x, y, w, h, label, body, dark_bg=False, body_size=12.5):
     fill_color = CARD_DARK if dark_bg else CARD_LIGHT
     body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
     r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
@@ -2145,48 +2177,17 @@ def card(slide, x, y, w, h, label, body, dark_bg=False):
     try: r.adjustments[0] = 0.06
     except: pass
     tb(slide, label.upper(), x+0.28, y+0.18, w-0.56, 0.30, size=10.5, color=GOLD, font=FONT_MONO_MED)
-    tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=12.5, color=body_color,
+    tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=body_size, color=body_color,
        font=FONT_MONO_LT, line_spacing=1.15)
 
-def card_url(slide, x, y, w, h, label, url, dark_bg=False):
-    """
-    Same visual style as card(), but the body is a real clickable
-    hyperlink to the actual Instagram post — opens the post when
-    clicked in PowerPoint / Keynote / Google Slides, instead of just
-    showing plain, unclickable text.
-    """
-    fill_color = CARD_DARK if dark_bg else CARD_LIGHT
-    body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
-    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
-    r.fill.solid(); r.fill.fore_color.rgb = fill_color; r.line.fill.background()
-    try: r.adjustments[0] = 0.06
-    except: pass
-    tb(slide, label.upper(), x+0.28, y+0.18, w-0.56, 0.30, size=10.5, color=GOLD, font=FONT_MONO_MED)
-    box = slide.shapes.add_textbox(Inches(x+0.28), Inches(y+0.50), Inches(w-0.56), Inches(h-0.6))
-    tf = box.text_frame; tf.word_wrap = True
-    p = tf.paragraphs[0]; p.line_spacing = 1.15
-    run = p.add_run()
-    if url and url != "N/A":
-        run.text = shorten_url(url, 50)
-        run.hyperlink.address = url
-        run.font.color.rgb = GOLD
-    else:
-        run.text = "N/A"
-        run.font.color.rgb = body_color
-    run.font.size = Pt(12.5)
-    run.font.name = FONT_MONO_LT
-    return box
+def shorten_url(url, maxlen=46):
+    if not url or url == "N/A":
+        return "N/A"
+    return url if len(url) <= maxlen else url[:maxlen-1] + "…"
 
 def link_list_card(slide, x, y, w, h, label, items, dark_bg=False):
-    """
-    A compact card showing several "label: link" lines stacked vertically
-    (e.g. Top reel / Worst reel / Max views) rather than squeezed onto
-    one long concatenated line — that's what was overflowing past the
-    card edge and colliding with the footer before. Each url becomes a
-    real clickable hyperlink.
-
-    items: list of (prefix_text, url) tuples, one per line.
-    """
+    """Stacked "label: link" lines. Links are gold (never blue — the file's
+    theme hyperlink color is also forced to gold after save)."""
     fill_color = CARD_DARK if dark_bg else CARD_LIGHT
     body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
     r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
@@ -2194,93 +2195,51 @@ def link_list_card(slide, x, y, w, h, label, items, dark_bg=False):
     try: r.adjustments[0] = 0.06
     except: pass
     tb(slide, label.upper(), x+0.28, y+0.14, w-0.56, 0.22, size=10, color=GOLD, font=FONT_MONO_MED)
-
     n = max(len(items), 1)
-    line_h = (h - 0.38) / n
+    line_h = (h - 0.40) / n
     for i, (prefix, url) in enumerate(items):
-        box = slide.shapes.add_textbox(Inches(x+0.28), Inches(y+0.36+i*line_h), Inches(w-0.56), Inches(line_h))
+        box = slide.shapes.add_textbox(Inches(x+0.28), Inches(y+0.38+i*line_h), Inches(w-0.56), Inches(line_h))
         tf = box.text_frame; tf.word_wrap = False
         p = tf.paragraphs[0]
-        run1 = p.add_run(); run1.text = prefix
-        run1.font.size = Pt(11.5); run1.font.name = FONT_MONO_LT; run1.font.color.rgb = body_color
-        run2 = p.add_run()
+        r1 = p.add_run(); r1.text = prefix
+        r1.font.size = Pt(11.5); r1.font.name = FONT_MONO_LT; r1.font.color.rgb = body_color
+        r2 = p.add_run()
         if url and url != "N/A":
-            run2.text = shorten_url(url, 44)
-            run2.hyperlink.address = url
-            run2.font.color.rgb = GOLD
+            r2.text = shorten_url(url)
+            r2.hyperlink.address = url
         else:
-            run2.text = "N/A"
-            run2.font.color.rgb = body_color
-        run2.font.size = Pt(11.5); run2.font.name = FONT_MONO
+            r2.text = "N/A"
+        r2.font.color.rgb = GOLD
+        r2.font.size = Pt(11.5); r2.font.name = FONT_MONO
 
-def linkedin_performance_slide(prs, blank, slide_num, category_label, category_data, sample_size):
-    """
-    One shared layout for all 7 LinkedIn content-type performance
-    slides (Videos, Multi-Image, Single-Image, Documents, Polls,
-    Text-Only, Other) — same visual structure as Facebook's Photos
-    Performance slide, just parameterized per category so the 7 nearly
-    identical slides don't need 7 copies of the same ~15 lines.
-    """
-    s, dark = start_slide(prs, blank, slide_num)
-    n = category_data.get("n", 0)
-    kicker_header(s, f"LinkedIn — {category_label}", f"{category_label} Performance",
-                  f"Based on {n} {category_label.lower()} post{'s' if n != 1 else ''} from the last {sample_size}",
-                  dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, category_data.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, category_data.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, category_data.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
-    stat_block(s, 0.55, 3.10, 3.86, category_data.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, category_data.get("avg_shares","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.10, 3.86, n, "Posts in Category", size=32, dark_bg=dark)
-
-    if n > 0:
-        card_url(s, 0.55, 4.75, 5.95, 1.75,
-                 f"Top-Performing {category_label} (score {category_data.get('top_score','N/A')})",
-                 category_data.get("top_url","N/A"), dark_bg=dark)
-        card_url(s, 6.65, 4.75, 5.80, 1.75,
-                 f"Lowest-Performing {category_label} (score {category_data.get('worst_score','N/A')})",
-                 category_data.get("worst_url","N/A"), dark_bg=dark)
-    else:
-        card(s, 0.55, 4.75, 12.23, 1.75, "No Posts in This Category",
-             f"No {category_label.lower()} posts appeared in the sample of LinkedIn posts analyzed for this report.",
-             dark_bg=dark)
-
-    footer_bar(s, slide_num, dark_bg=dark)
-
-
-def branded_table(slide, headers, rows, x, y, w, h, dark_bg=False):
+def rounded_table(slide, headers, rows, x, y, w, dark_bg=False, row_h=0.52):
+    """Curved-edge table built from rounded-rectangle rows."""
     cols = len(headers)
-    tbl  = slide.shapes.add_table(len(rows)+1, cols, Inches(x), Inches(y), Inches(w), Inches(h)).table
-    try: tbl.first_row = False; tbl.horz_banding = False
+    cw = w / cols
+    hdr_fill  = GOLD if dark_bg else BG_DARK
+    hdr_text  = BG_DARK if dark_bg else TEXT_LIGHT
+    body_fill = CARD_DARK if dark_bg else CARD_LIGHT
+    body_text = TEXT_LIGHT if dark_bg else TEXT_DARK
+    r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(row_h))
+    r.fill.solid(); r.fill.fore_color.rgb = hdr_fill; r.line.fill.background()
+    try: r.adjustments[0] = 0.28
     except: pass
-    cw = Inches(w/cols)
-    for i in range(cols): tbl.columns[i].width = cw
-
-    header_fill = GOLD if dark_bg else BG_DARK
-    header_text = BG_DARK if dark_bg else TEXT_LIGHT
-    body_fill   = CARD_DARK if dark_bg else BG_LIGHT
-    body_text   = TEXT_LIGHT if dark_bg else TEXT_DARK
-
     for ci, hdr in enumerate(headers):
-        cell = tbl.cell(0, ci)
-        cell.text = hdr
-        cell.fill.solid(); cell.fill.fore_color.rgb = header_fill
-        p = cell.text_frame.paragraphs[0]
-        p.font.bold = True; p.font.size = Pt(13); p.font.name = FONT_MONO_MED
-        p.font.color.rgb = header_text
-        p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
-        cell.margin_left = Inches(0.12)
-    for ri, row in enumerate(rows):
+        tb(slide, hdr, x+ci*cw+0.18, y+0.10, cw-0.30, 0.32, size=12.5, bold=True,
+           color=hdr_text, font=FONT_MONO_MED,
+           align=PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER)
+    yy = y + row_h + 0.10
+    for row in rows:
+        rr = slide.shapes.add_shape(5, Inches(x), Inches(yy), Inches(w), Inches(row_h))
+        rr.fill.solid(); rr.fill.fore_color.rgb = body_fill; rr.line.fill.background()
+        try: rr.adjustments[0] = 0.28
+        except: pass
         for ci, val in enumerate(row):
-            cell = tbl.cell(ri+1, ci)
-            cell.text = str(val)
-            cell.fill.solid(); cell.fill.fore_color.rgb = body_fill
-            p = cell.text_frame.paragraphs[0]
-            p.font.size = Pt(13); p.font.name = FONT_MONO
-            p.font.color.rgb = body_text
-            p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
-            cell.margin_left = Inches(0.12)
-    return tbl
+            tb(slide, str(val), x+ci*cw+0.18, yy+0.10, cw-0.30, 0.32, size=12,
+               color=body_text, font=FONT_MONO,
+               align=PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER)
+        yy += row_h + 0.10
+    return yy
 
 def start_slide(prs, blank, slide_num):
     is_dark = (slide_num % 2 == 1)
@@ -2289,22 +2248,8 @@ def start_slide(prs, blank, slide_num):
     brand_mark(s, dark_bg=is_dark, top_right=(slide_num != 1))
     return s, is_dark
 
-def shorten_url(url, maxlen=42):
-    if not url or url == "N/A":
-        return "N/A"
-    return url if len(url) <= maxlen else url[:maxlen-1] + "…"
-
 def truncate_to_sentence(text, max_chars=480):
-    """
-    Hard safety net for card text: guarantees the string never exceeds
-    max_chars, regardless of how long Claude's generated text turns out
-    to be. Cuts at the last full sentence that fits (so it never ends
-    mid-word), falling back to a plain word-boundary cut only if no
-    sentence break exists anywhere within the limit. This is the actual
-    guarantee that text can never overflow a fixed-size slide card — the
-    prompt-level length instruction is just a soft, best-effort request
-    on top of this.
-    """
+    """Hard cap for card text — cuts at the last full sentence that fits."""
     if not text or len(text) <= max_chars:
         return text
     window = text[:max_chars]
@@ -2315,14 +2260,35 @@ def truncate_to_sentence(text, max_chars=480):
             best_cut = cut
     if best_cut > 0:
         return window[:best_cut+1]
-    # No sentence break found anywhere in the window — cut at the last
-    # full word instead, so we at least never chop a word in half.
     cut = window.rfind(" ")
     return (window[:cut] if cut > 0 else window) + "…"
 
+def _force_gold_hyperlinks(pptx_path):
+    """Post-save: rewrite the theme's hyperlink colors to brand gold so
+    links never render blue in PowerPoint / Keynote / Google Slides."""
+    import zipfile, shutil, tempfile
+    tmp = tempfile.mkdtemp()
+    try:
+        with zipfile.ZipFile(pptx_path) as z:
+            z.extractall(tmp)
+        theme_path = os.path.join(tmp, "ppt", "theme", "theme1.xml")
+        if os.path.exists(theme_path):
+            xml = open(theme_path, encoding="utf-8").read()
+            xml = re.sub(r'(<a:hlink>\s*<a:srgbClr val=")[0-9A-Fa-f]{6}(")', r'\g<1>B8945A\g<2>', xml)
+            xml = re.sub(r'(<a:folHlink>\s*<a:srgbClr val=")[0-9A-Fa-f]{6}(")', r'\g<1>B8945A\g<2>', xml)
+            open(theme_path, "w", encoding="utf-8").write(xml)
+            os.remove(pptx_path)
+            with zipfile.ZipFile(pptx_path, "w", zipfile.ZIP_DEFLATED) as z:
+                for root, dirs, files in os.walk(tmp):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        z.write(fp, os.path.relpath(fp, tmp))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — BUILD 17-SLIDE MIDNIGHT PANDA BRANDED PPT
+# STEP 5 — BUILD 40-SLIDE MIDNIGHT PANDA BRANDED PPT (REDESIGN)
 # ═══════════════════════════════════════════════════════════════
 
 def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
@@ -2331,461 +2297,388 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
 
-    ig = analysis.get("instagram", {})
-    fb = analysis.get("facebook", {})
-    yt = analysis.get("youtube", {})
-    li = analysis.get("linkedin", {})
-    cp = analysis.get("cross_platform", {})
-    brand = analysis.get("brand_name", website_url)
-    niche = analysis.get("niche", "")
+    A = analysis  # shorthand
+    ig = A.get("instagram", {})
+    fb = A.get("facebook", {})
+    yt = A.get("youtube", {})
+    li = A.get("linkedin", {})
+    cp = A.get("cross_platform", {})
+    brand = A.get("brand_name", website_url)
+    niche = A.get("niche", "")
+    site_display = website_url.replace("https://","").replace("http://","")
+
+    def T(key, max_chars=480):
+        """Analysis text with hard overflow cap."""
+        return truncate_to_sentence(str(A.get(key, "") or ""), max_chars=max_chars)
 
     ig_images    = ig_raw.get("images", {})
     ig_carousels = ig_raw.get("carousels", {})
     ig_reels     = ig_raw.get("reels", {})
-
-    def parse_num(val):
-        try:
-            v = str(val).replace(",","").upper().replace("+","")
-            if "M" in v: return float(v.replace("M","")) * 1_000_000
-            if "K" in v: return float(v.replace("K","")) * 1_000
-            return float(v)
-        except: return 0
+    yt_shorts    = yt_raw.get("shorts", {})
+    yt_videos    = yt_raw.get("videos_performance", {})
+    fb_photos    = fb_raw.get("photos", {})
+    fb_videos    = fb_raw.get("videos", {})
+    fb_links     = fb_raw.get("links", {})
+    li_categories = li_raw.get("categories", {})
 
     # ── SLIDE 1: COVER (dark) ─────────────────────────────────
     s, dark = start_slide(prs, blank, 1)
-    tb(s, "SOCIAL INTELLIGENCE REPORT", 0.55, 1.55, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
-    tb(s, brand, 0.55, 1.95, 11.50, 1.50, size=58, color=TEXT_LIGHT, font=FONT_SERIF)
-    tb(s, niche, 0.55, 2.95, 11.50, 0.45, size=15, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
-    tb(s, website_url.replace("https://","").replace("http://",""), 0.55, 3.42, 11.50, 0.35,
-       size=11.5, color=GOLD, font=FONT_MONO)
-    platform_labels = []
-    if handles.get("instagram"): platform_labels.append("Instagram")
-    if handles.get("facebook"):  platform_labels.append("Facebook")
-    if handles.get("youtube"):   platform_labels.append("YouTube")
-    if handles.get("linkedin"):  platform_labels.append("LinkedIn")
-    for i, label in enumerate(platform_labels):
-        pill(s, 0.55 + i*2.12, 4.05, label)
-    stat_block(s, 0.55, 5.05, 2.83, ig_raw.get("followers","N/A"), "Instagram Followers", size=44, dark_bg=True)
-    stat_block(s, 3.68, 5.05, 2.83, fb_raw.get("followers","N/A"), "Facebook Followers",  size=44, dark_bg=True)
-    stat_block(s, 6.81, 5.05, 2.83, yt_raw.get("subscribers","N/A"), "YouTube Subscribers", size=44, dark_bg=True)
-    stat_block(s, 9.94, 5.05, 2.83, li_raw.get("followers","N/A"), "LinkedIn Followers",   size=44, dark_bg=True)
-    tb(s, f"Powered by SearchAPI.io + Apify + Claude AI  ·  {website_url.replace('https://','').replace('http://','')}",
-       0.55, 6.85, 11.50, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
+    tb(s, "SOCIAL INTELLIGENCE REPORT", 0.55, 1.30, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
+    tb(s, brand, 0.55, 1.70, 11.50, 1.50, size=58, color=TEXT_LIGHT, font=FONT_SERIF)
+    tb(s, niche, 0.55, 2.70, 11.50, 0.45, size=15, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
+    tb(s, site_display, 0.55, 3.17, 11.50, 0.35, size=11.5, color=GOLD, font=FONT_MONO)
+    box = s.shapes.add_textbox(Inches(0.55), Inches(3.70), Inches(8.0), Inches(0.35))
+    p = box.text_frame.paragraphs[0]
+    r1 = p.add_run(); r1.text = "Generated by "
+    r1.font.size = Pt(12); r1.font.name = FONT_MONO_LT; r1.font.color.rgb = TEXT_GRAY_LT
+    r2 = p.add_run(); r2.text = "midnightpanda.ai"
+    r2.hyperlink.address = "https://midnightpanda.ai"
+    r2.font.size = Pt(12); r2.font.name = FONT_MONO_MED; r2.font.color.rgb = GOLD
+    tb(s, "OUR OTHER TOOLS", 0.55, 4.55, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
+    for i, tool in enumerate(["AI Brand Intelligence", "Competitor Ad Analysis",
+                              "Social Listening", "SEO & Traffic Intelligence"]):
+        x = 0.55 + (i % 2) * 4.55
+        y = 4.95 + (i // 2) * 0.78
+        r = s.shapes.add_shape(5, Inches(x), Inches(y), Inches(4.25), Inches(0.60))
+        r.fill.solid(); r.fill.fore_color.rgb = CARD_DARK; r.line.fill.background()
+        try: r.adjustments[0] = 0.30
+        except: pass
+        tb(s, tool, x+0.30, y+0.14, 3.85, 0.34, size=12.5, color=TEXT_LIGHT, font=FONT_MONO)
     ln = s.shapes.add_shape(1, Inches(0), Inches(7.46), Inches(13.33), Pt(0.75))
     ln.fill.solid(); ln.fill.fore_color.rgb = RGBColor(0x2A,0x2A,0x2A); ln.line.fill.background()
+    tb(s, f"{TOTAL_SLIDES}-slide report  ·  Instagram · Facebook · YouTube · LinkedIn",
+       0.55, 7.08, 8.00, 0.30, size=8.5, color=TEXT_FOOTER, font=FONT_MONO)
 
-    # ── SLIDE 2: Overview (light) ─────────────────────────────
+    # ── SLIDE 2: Report Overview (light) ──────────────────────
     s, dark = start_slide(prs, blank, 2)
     kicker_header(s, "Report Overview", "Social Media Overview", f"{brand} — all platforms at a glance", dark_bg=dark)
-    branded_table(s, ["Platform","Handle","Followers","Key Metric","Status"], [
-        ["Instagram", f"@{handles.get('instagram','N/A')}", ig_raw.get("followers","N/A"), f"ER: {ig_raw.get('engagement_rate','N/A')}", "Active" if handles.get("instagram") else "Not Found"],
-        ["Facebook",  handles.get("facebook","N/A"),  fb_raw.get("followers","N/A"), f"Rating: {fb.get('rating','N/A')}",       "Active" if handles.get("facebook") else "Not Found"],
-        ["YouTube",   handles.get("youtube","N/A"),   yt_raw.get("subscribers","N/A"), f"ER: {yt_raw.get('engagement_rate','N/A')}", "Active" if handles.get("youtube") else "Not Found"],
-        ["LinkedIn",  handles.get("linkedin","N/A"),  li_raw.get("followers","N/A"), f"Employees: {li_raw.get('employees','N/A')}", "Active" if handles.get("linkedin") else "Not Found"],
-    ], 0.55, 1.65, 12.23, 2.35, dark_bg=dark)
-    card(s, 0.55, 4.35, 12.23, 2.15, "Overall Analysis", analysis.get("overall_summary",""), dark_bg=dark)
+    rounded_table(s, ["Platform", "Handle", "Followers", "Status"], [
+        ["Instagram", f"@{handles.get('instagram','N/A')}", usfmt(ig_raw.get("followers","N/A")),
+         "Active" if handles.get("instagram") else "Not Found"],
+        ["Facebook",  handles.get("facebook","N/A"),  usfmt(fb_raw.get("followers","N/A")),
+         "Active" if handles.get("facebook") else "Not Found"],
+        ["YouTube",   yt_raw.get("handle", handles.get("youtube","N/A")), usfmt(yt_raw.get("subscribers","N/A")),
+         "Active" if handles.get("youtube") else "Not Found"],
+        ["LinkedIn",  handles.get("linkedin","N/A"),  usfmt(li_raw.get("followers","N/A")),
+         "Active" if handles.get("linkedin") else "Not Found"],
+    ], 0.55, 1.70, 12.23, dark_bg=dark)
+    card(s, 0.55, 4.95, 12.23, 1.95, "Quick Overview of Report", T("quick_overview"), dark_bg=dark, body_size=11.5)
     footer_bar(s, 2, dark_bg=dark)
 
-    # ── SLIDE 3: Instagram Overview (dark) ────────────────────
-    s, dark = start_slide(prs, blank, 3)
-    kicker_header(s, "Instagram", "Instagram Overview",
-                  f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+    # ── Shared: hours/days/consistency/momentum rows ───────────
+    def hours_days_rows(slide, d, y, dark_bg):
+        sub = TEXT_GRAY_LT if dark_bg else TEXT_GRAY
+        tb(slide, f"Most Frequent Hour: {d.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {d.get('best_performing_hour','N/A')}",
+           0.55, y, 12.23, 0.24, size=12, color=sub, font=FONT_MONO_LT)
+        tb(slide, f"Most Active Day: {d.get('most_active_day','N/A')}   ·   Least Active Day: {d.get('least_active_day','N/A')}   ·   Best Performing Day: {d.get('best_performing_day','N/A')}",
+           0.55, y+0.27, 12.23, 0.24, size=12, color=sub, font=FONT_MONO_LT)
+        tb(slide, f"Posting Consistency: {d.get('posting_consistency','N/A')}",
+           0.55, y+0.54, 12.23, 0.24, size=12, color=sub, font=FONT_MONO_LT)
+        # Momentum on its own line BELOW consistency — always brand gold
+        md = d.get("momentum_direction")
+        arrow = "\u25B2 " if md == "up" else ("\u25BC " if md == "down" else "")
+        tb(slide, f"Momentum: {arrow}{d.get('momentum_pct','N/A')}", 0.55, y+0.81, 12.23, 0.24,
+           size=12, bold=True, color=GOLD, font=FONT_MONO_MED)
 
-    # ── Core metrics (unchanged) ──────────────────────────────────────
-    stat_block(s, 0.55, 1.75, 3.86, ig_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("posts","N/A"), "Total Posts (all time)", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
-    stat_block(s, 0.55, 3.15, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.15, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate (Reels Only)", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.15, 3.86, ig_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
+    def overview_slide(n, kicker, title, sub, stats_row1, stats_row2, d, analysis_text):
+        s, dark = start_slide(prs, blank, n)
+        kicker_header(s, kicker, title, sub, dark_bg=dark)
+        for i, (val, lbl, sz) in enumerate(stats_row1):
+            stat_block(s, 0.55 + i*4.18, 1.75, 3.86, val, lbl, size=sz, dark_bg=dark)
+        for i, (val, lbl, sz) in enumerate(stats_row2):
+            stat_block(s, 0.55 + i*4.18, 3.05, 3.86, val, lbl, size=sz, dark_bg=dark)
+        div = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+        ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.02), Inches(12.23), Pt(0.75))
+        ln.fill.solid(); ln.fill.fore_color.rgb = div; ln.line.fill.background()
+        hours_days_rows(s, d, 4.14, dark)
+        card(s, 0.55, 5.35, 12.23, 1.60, f"{kicker} Analysis", analysis_text, dark_bg=dark, body_size=11)
+        footer_bar(s, n, dark_bg=dark)
 
-    # ── Thin divider — separates the core metrics above from the
-    #    posting-behavior insights below, for cleaner visual grouping ──
-    divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
-    ln3 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
-    ln3.fill.solid(); ln3.fill.fore_color.rgb = divider_color; ln3.line.fill.background()
+    # ── SLIDE 3: Instagram Overview (dark) ─────────────────────
+    overview_slide(3, "Instagram", "Instagram Overview",
+        f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts",
+        [(usfmt(ig_raw.get("followers","N/A")), "Followers", 54),
+         (usfmt(ig_raw.get("posts","N/A")), "Total Posts (all time)", 54),
+         (ig_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
+        [(ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", 32),
+         (ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", 32),
+         (ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", 32)],
+        ig_raw, T("instagram_analysis"))
 
-    # ── Row 3: hour insights, consistency, momentum — compact text
-    #    lines rather than giant gold numbers, so these extra stats
-    #    don't visually overwhelm an already busy slide. ────────────
-    sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
-    tb(s, f"Most Frequent Hour: {ig_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {ig_raw.get('best_performing_hour','N/A')}",
-       0.55, 4.24, 12.23, 0.24, size=12, color=sub_color, font=FONT_MONO_LT)
-    tb(s, f"Posting Consistency: {ig_raw.get('posting_consistency','N/A')}",
-       0.55, 4.50, 5.95, 0.24, size=12, color=sub_color, font=FONT_MONO_LT)
-
-    momentum_direction = ig_raw.get("momentum_direction")
-    momentum_pct       = ig_raw.get("momentum_pct", "N/A")
-    if momentum_direction == "up":
-        momentum_color, momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {momentum_pct}"
-    elif momentum_direction == "down":
-        momentum_color, momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {momentum_pct}"
-    else:
-        momentum_color, momentum_text = sub_color,      f"Momentum: {momentum_pct}"
-    tb(s, momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=momentum_color, font=FONT_MONO_MED)
-
-    # ── Instagram Analysis — full slide width now that the photo is
-    #    gone, with a hard character cap so long Claude output can
-    #    never overflow the card, regardless of what gets generated. ──
-    analysis_text = truncate_to_sentence(analysis.get("instagram_analysis",""), max_chars=480)
-    card(s, 0.55, 4.86, 12.23, 1.55, "Instagram Analysis", analysis_text, dark_bg=dark)
-
-    tb(s, f"Most Active Day: {ig_raw.get('most_active_day','N/A')}   ·   Least Active Day: {ig_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
-       0.55, 6.50, 12.23, 0.22, size=11, color=sub_color, font=FONT_MONO_LT)
-
-    outlier_note = ig_raw.get("outlier_note")
-    if outlier_note:
-        tb(s, outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
-
-    footer_bar(s, 3, dark_bg=dark)
-
-    # ── SLIDE 4: Instagram Content Strategy (light) ───────────
+    # ── SLIDE 4: IG Content Strategy (light) ───────────────────
     s, dark = start_slide(prs, blank, 4)
     kicker_header(s, "Instagram", "Content Strategy",
                   f"Content mix from the last {ig_raw.get('sample_size',30)} posts", dark_bg=dark)
     img_c = ig_raw.get("img_count",0); car_c = ig_raw.get("car_count",0); vid_c = ig_raw.get("vid_count",0)
-    total = max(img_c+car_c+vid_c, 1)
-    cd = ChartData()
-    cd.categories = ["Images","Carousels","Videos / Reels"]
+    total = max(img_c + car_c + vid_c, 1)
+    cd = ChartData(); cd.categories = ["Images","Carousels","Videos / Reels"]
     cd.add_series("Posts",(img_c,car_c,vid_c))
-    chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.85),Inches(5.40),Inches(4.50),cd).chart
+    chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
+    chart.has_legend = True
+    for i, col in enumerate([PIE_TAN, CARD_DARK, GOLD]):
+        pt = chart.plots[0].series[0].points[i]
+        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
+    for lbl, cnt, y in [("Videos / Reels",vid_c,1.95),("Carousels",car_c,3.05),("Images",img_c,4.15)]:
+        stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/total*100))}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
+    card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", T("instagram_content_analysis"), dark_bg=dark, body_size=11.5)
+    footer_bar(s, 4, dark_bg=dark)
+
+    # ── Format performance slide (IG images/carousels, FB photos) ──
+    def format_perf_slide(n, kicker, title, d, sample, unit, analysis_text):
+        s, dark = start_slide(prs, blank, n)
+        kicker_header(s, kicker, title,
+                      f"Based on {d.get('n',0)} {unit} from the last {sample}", dark_bg=dark)
+        stat_block(s, 0.55, 1.75, 3.86, d.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
+        stat_block(s, 4.73, 1.75, 3.86, d.get("er_per_follower","N/A"), "Engagement Rate / Followers", size=44, dark_bg=dark)
+        stat_block(s, 8.92, 1.75, 3.86, d.get("er_estimated","N/A"), "Estimated Engagement Rate / Followers", size=44, dark_bg=dark)
+        stat_block(s, 0.55, 3.10, 3.86, d.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
+        stat_block(s, 4.73, 3.10, 3.86, d.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
+        stat_block(s, 8.92, 3.10, 3.86, d.get("n",0), "Posts in Sample", size=32, dark_bg=dark)
+        card(s, 0.55, 4.45, 12.23, 2.10, "Analysis", analysis_text, dark_bg=dark)
+        footer_bar(s, n, dark_bg=dark)
+
+    format_perf_slide(5, "Instagram — Images", "Images Performance", ig_images,
+                      ig_raw.get("sample_size",30), "image posts", T("instagram_images_analysis"))
+    format_perf_slide(6, "Instagram — Carousels", "Carousels Performance", ig_carousels,
+                      ig_raw.get("sample_size",30), "carousel posts", T("instagram_carousels_analysis"))
+
+    # ── SLIDE 7: IG Reels Performance (dark) — ER by view on top ──
+    s, dark = start_slide(prs, blank, 7)
+    kicker_header(s, "Instagram — Reels", "Reels Performance",
+                  f"Based on {ig_reels.get('n',0)} reels from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, ig_reels.get("er_by_view","N/A"), "Engagement Rate by View", size=44, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, ig_reels.get("avg_engagement","N/A"), "Avg Engagement / Reel", size=44, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, ig_reels.get("avg_views","N/A"), "Avg Views / Reel", size=44, dark_bg=dark)
+    stat_block(s, 0.55, 3.10, 3.86, ig_reels.get("avg_likes","N/A"), "Avg Likes / Reel", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 3.10, 3.86, ig_reels.get("avg_comments","N/A"), "Avg Comments / Reel", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 3.10, 3.86, ig_reels.get("er_per_follower","N/A"), "Engagement Rate / Followers", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 4.20, 3.86, ig_reels.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 4.20, 3.86, ig_reels.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 8.92, 4.20, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 5.30, 3.86, ig_reels.get("er_estimated","N/A"), "Estimated ER / Followers", size=28, dark_bg=dark)
+    stat_block(s, 4.73, 5.30, 3.86, ig_reels.get("n",0), "Reels in Sample", size=28, dark_bg=dark)
+    footer_bar(s, 7, dark_bg=dark)
+
+    # ── Deep dive slide (links + analysis) ─────────────────────
+    def deep_dive_slide(n, kicker, title, d, analysis_text, unit="post"):
+        s, dark = start_slide(prs, blank, n)
+        kicker_header(s, kicker, title,
+                      "Top and bottom performers, and how the rate compares to the market", dark_bg=dark)
+        items = [
+            (f"Top {unit} (score {d.get('top_score','N/A')}):  ", d.get("top_url","N/A")),
+            (f"Worst {unit} (score {d.get('worst_score','N/A')}):  ", d.get("worst_url","N/A")),
+        ]
+        if d.get("max_views") is not None:
+            items.append((f"Max views ({usfmt(d.get('max_views','N/A'))}):  ", d.get("max_views_url","N/A")))
+        link_list_card(s, 0.55, 1.85, 12.23, 1.60, "Top / Worst / Max Views", items, dark_bg=dark)
+        card(s, 0.55, 3.80, 12.23, 2.60, "Analysis", analysis_text, dark_bg=dark)
+        footer_bar(s, n, dark_bg=dark)
+
+    # ── SLIDE 8: IG Reels Deep Dive (light) ────────────────────
+    deep_dive_slide(8, "Instagram — Reels", "Reels Deep Dive", ig_reels,
+                    T("instagram_reels_analysis"), unit="reel")
+
+    # ── SLIDE 9: IG Format Comparison (dark) ───────────────────
+    s, dark = start_slide(prs, blank, 9)
+    kicker_header(s, "Instagram", "Format Comparison",
+                  "Engagement rate per follower across the three formats", dark_bg=dark)
+    rounded_table(s, ["Format", "Posts", "ER / Followers", "Estimated ER"], [
+        ["Reels", ig_reels.get("n",0), ig_reels.get("er_per_follower","N/A"), ig_reels.get("er_estimated","N/A")],
+        ["Carousels", ig_carousels.get("n",0), ig_carousels.get("er_per_follower","N/A"), ig_carousels.get("er_estimated","N/A")],
+        ["Images", ig_images.get("n",0), ig_images.get("er_per_follower","N/A"), ig_images.get("er_estimated","N/A")],
+    ], 0.55, 1.75, 12.23, dark_bg=dark)
+    card(s, 0.55, 4.55, 12.23, 2.30, "What Works Best", T("instagram_comparison_analysis"), dark_bg=dark)
+    footer_bar(s, 9, dark_bg=dark)
+
+    # ── Summary slide (4 cards + verdict) ──────────────────────
+    def summary_slide(n, kicker, title, cards_list):
+        s, dark = start_slide(prs, blank, n)
+        kicker_header(s, kicker, title,
+                      "Everything on one slide — metrics, momentum, and the verdict", dark_bg=dark)
+        positions = [(0.55, 1.75), (6.83, 1.75), (0.55, 3.45), (6.83, 3.45)]
+        for (x, y), (lbl, body) in zip(positions, cards_list[:4]):
+            card(s, x, y, 5.96, 1.45, lbl, body, dark_bg=dark, body_size=11.5)
+        if len(cards_list) > 4:
+            lbl, body = cards_list[4]
+            card(s, 0.55, 5.15, 12.23, 1.75, lbl, body, dark_bg=dark, body_size=11.5)
+        footer_bar(s, n, dark_bg=dark)
+
+    # ── SLIDE 10: IG Summary (light) ───────────────────────────
+    summary_slide(10, "Instagram", "Instagram Summary", [
+        ("Audience", f"{usfmt(ig_raw.get('followers','N/A'))} followers · primary reach platform"),
+        ("Performance", f"ER {ig_raw.get('engagement_rate','N/A')} per follower · Reels {ig_raw.get('engagement_rate_reels','N/A')} per view · momentum {ig_raw.get('momentum_pct','N/A')}"),
+        ("Cadence", f"{ig_raw.get('posting_frequency','N/A')} · {ig_raw.get('posting_consistency','N/A')} · best hour {ig_raw.get('best_performing_hour','N/A')} · best day {ig_raw.get('best_performing_day','N/A')}"),
+        ("Strongest Format", str(ig.get("strength","N/A"))),
+        ("Overall Instagram Analysis", T("instagram_summary")),
+    ])
+
+    # ── SLIDE 11: Facebook Overview (dark) ─────────────────────
+    overview_slide(11, "Facebook", "Facebook Overview",
+        f"{handles.get('facebook','N/A')}  ·  Based on last {fb_raw.get('sample_size','N/A')} posts",
+        [(usfmt(fb_raw.get("followers","N/A")), "Page Followers", 54),
+         (str(fb_raw.get("sample_size","N/A")), "Posts Analyzed", 54),
+         (fb_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
+        [(fb_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", 32),
+         (fb_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", 32),
+         (fb_raw.get("engagement_rate_videos","N/A"), "Engagement Rate (Videos Only)", 32)],
+        fb_raw, T("facebook_analysis"))
+
+    # ── SLIDE 12: FB Content Strategy (light) ──────────────────
+    s, dark = start_slide(prs, blank, 12)
+    kicker_header(s, "Facebook", "Content Strategy",
+                  f"Content mix from the last {fb_raw.get('sample_size',30)} posts", dark_bg=dark)
+    fb_photo_c = fb_raw.get("photo_count",0); fb_video_c = fb_raw.get("video_count",0); fb_link_c = fb_raw.get("link_count",0)
+    fb_total = max(fb_photo_c + fb_video_c + fb_link_c, 1)
+    cd = ChartData(); cd.categories = ["Photos","Videos","Links"]
+    cd.add_series("Posts",(fb_photo_c,fb_video_c,fb_link_c))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
     chart.has_legend = True
     for i, col in enumerate([GOLD, CARD_DARK, PIE_TAN]):
         pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    for lbl, cnt, y in [("Videos / Reels",vid_c,2.10),("Carousels",car_c,3.25),("Images",img_c,4.40)]:
-        pct = int(round(cnt/total*100))
-        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
-    card(s, 6.85, 5.55, 5.60, 1.00, "Instagram Strength", ig.get("strength",""), dark_bg=dark)
-    footer_bar(s, 4, dark_bg=dark)
-
-    # ── SLIDE 5: Images Performance (dark) ────────────────────
-    s, dark = start_slide(prs, blank, 5)
-    kicker_header(s, "Instagram — Images", "Images Performance",
-                  f"Based on {ig_images.get('n',0)} image posts from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, ig_images.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, ig_images.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, ig_images.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
-    stat_block(s, 0.55, 3.10, 3.86, ig_images.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, ig_images.get("avg_shares","N/A"), "Avg Shares / Post", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.10, 3.86, ig_images.get("avg_reposts","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
-    card_url(s, 0.55, 4.75, 5.95, 1.75,
-             f"Top-Performing Image (score {ig_images.get('top_score','N/A')})",
-             ig_images.get("top_url","N/A"), dark_bg=dark)
-    card_url(s, 6.65, 4.75, 5.80, 1.75,
-             f"Lowest-Performing Image (score {ig_images.get('worst_score','N/A')})",
-             ig_images.get("worst_url","N/A"), dark_bg=dark)
-    footer_bar(s, 5, dark_bg=dark)
-
-    # ── SLIDE 6: Carousels Performance (light) ────────────────
-    s, dark = start_slide(prs, blank, 6)
-    kicker_header(s, "Instagram — Carousels", "Carousels Performance",
-                  f"Based on {ig_carousels.get('n',0)} carousel posts from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, ig_carousels.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, ig_carousels.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, ig_carousels.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
-    stat_block(s, 0.55, 3.10, 3.86, ig_carousels.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, ig_carousels.get("avg_shares","N/A"), "Avg Shares / Post", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.10, 3.86, ig_carousels.get("avg_reposts","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
-    card_url(s, 0.55, 4.75, 5.95, 1.75,
-             f"Top-Performing Carousel (score {ig_carousels.get('top_score','N/A')})",
-             ig_carousels.get("top_url","N/A"), dark_bg=dark)
-    card_url(s, 6.65, 4.75, 5.80, 1.75,
-             f"Lowest-Performing Carousel (score {ig_carousels.get('worst_score','N/A')})",
-             ig_carousels.get("worst_url","N/A"), dark_bg=dark)
-    footer_bar(s, 6, dark_bg=dark)
-
-    # ── SLIDE 7: Reels Performance (dark) ─────────────────────
-    s, dark = start_slide(prs, blank, 7)
-    kicker_header(s, "Instagram — Reels", "Reels Performance",
-                  f"Based on {ig_reels.get('n',0)} reels from the last {ig_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, ig_reels.get("avg_engagement","N/A"), "Avg Engagement / Reel", size=40, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, ig_reels.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=40, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, ig_reels.get("avg_views","N/A"), "Avg Views / Reel", size=40, dark_bg=dark)
-    stat_block(s, 0.55, 2.95, 3.86, ig_reels.get("avg_likes","N/A"), "Avg Likes / Reel", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 2.95, 3.86, ig_reels.get("avg_comments","N/A"), "Avg Comments / Reel", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 2.95, 3.86, ig_reels.get("avg_shares","N/A"), "Avg Shares / Reel", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 4.05, 3.86, ig_reels.get("avg_reposts","N/A"), "Avg Reposts / Reel", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 4.05, 3.86, ig_reels.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 4.05, 3.86, ig_reels.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 5.15, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 5.15, 3.86, ig_reels.get("repost_rate","N/A"), "Repost Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 5.15, 3.86, ig_reels.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
-    link_list_card(s, 0.55, 6.10, 12.23, 0.92, "Top / Worst / Max Views", [
-        (f"Top reel (score {ig_reels.get('top_score','N/A')}):  ",       ig_reels.get("top_url","N/A")),
-        (f"Worst reel (score {ig_reels.get('worst_score','N/A')}):  ",   ig_reels.get("worst_url","N/A")),
-        (f"Max views ({ig_reels.get('max_views','N/A')}):  ",            ig_reels.get("max_views_url","N/A")),
-    ], dark_bg=dark)
-    footer_bar(s, 7, dark_bg=dark)
-
-    # ── SLIDE 8: Facebook Overview (light) ──────────────────────
-    s, dark = start_slide(prs, blank, 8)
-    kicker_header(s, "Facebook", "Facebook Overview",
-                  f"{handles.get('facebook','N/A')}  ·  Based on last {fb_raw.get('sample_size','N/A')} posts", dark_bg=dark)
-
-    stat_block(s, 0.55, 1.75, 3.86, fb_raw.get("followers","N/A"), "Page Followers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, fb_raw.get("sample_size","N/A"), "Posts Analyzed", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, fb_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
-    stat_block(s, 0.55, 3.15, 3.86, fb_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.15, 3.86, fb_raw.get("engagement_rate_videos","N/A"), "Engagement Rate (Videos Only)", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.15, 3.86, fb_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
-
-    fb_divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
-    ln8 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
-    ln8.fill.solid(); ln8.fill.fore_color.rgb = fb_divider_color; ln8.line.fill.background()
-
-    fb_sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
-    tb(s, f"Most Frequent Hour: {fb_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {fb_raw.get('best_performing_hour','N/A')}",
-       0.55, 4.24, 12.23, 0.24, size=12, color=fb_sub_color, font=FONT_MONO_LT)
-    tb(s, f"Posting Consistency: {fb_raw.get('posting_consistency','N/A')}",
-       0.55, 4.50, 5.95, 0.24, size=12, color=fb_sub_color, font=FONT_MONO_LT)
-
-    fb_momentum_direction = fb_raw.get("momentum_direction")
-    fb_momentum_pct       = fb_raw.get("momentum_pct", "N/A")
-    if fb_momentum_direction == "up":
-        fb_momentum_color, fb_momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {fb_momentum_pct}"
-    elif fb_momentum_direction == "down":
-        fb_momentum_color, fb_momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {fb_momentum_pct}"
-    else:
-        fb_momentum_color, fb_momentum_text = fb_sub_color,   f"Momentum: {fb_momentum_pct}"
-    tb(s, fb_momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=fb_momentum_color, font=FONT_MONO_MED)
-
-    fb_analysis_text = truncate_to_sentence(analysis.get("facebook_analysis",""), max_chars=480)
-    card(s, 0.55, 4.86, 12.23, 1.55, "Facebook Analysis", fb_analysis_text, dark_bg=dark)
-
-    tb(s, f"Most Active Day: {fb_raw.get('most_active_day','N/A')}   ·   Least Active Day: {fb_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
-       0.55, 6.50, 12.23, 0.22, size=11, color=fb_sub_color, font=FONT_MONO_LT)
-
-    fb_outlier_note = fb_raw.get("outlier_note")
-    if fb_outlier_note:
-        tb(s, fb_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
-
-    footer_bar(s, 8, dark_bg=dark)
-
-    # ── SLIDE 9: Facebook Content Strategy (dark) ───────────────
-    s, dark = start_slide(prs, blank, 9)
-    kicker_header(s, "Facebook", "Content Strategy",
-                  f"Content mix from the last {fb_raw.get('sample_size',30)} posts", dark_bg=dark)
-    fb_photo_c = fb_raw.get("photo_count",0); fb_video_c = fb_raw.get("video_count",0); fb_link_c = fb_raw.get("link_count",0)
-    fb_total = max(fb_photo_c+fb_video_c+fb_link_c, 1)
-    fb_cd = ChartData()
-    fb_cd.categories = ["Photos","Videos","Links"]
-    fb_cd.add_series("Posts",(fb_photo_c,fb_video_c,fb_link_c))
-    fb_chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.85),Inches(5.40),Inches(4.50),fb_cd).chart
-    fb_chart.has_legend = True
-    for i, col in enumerate([GOLD, CARD_DARK, PIE_TAN]):
-        pt = fb_chart.plots[0].series[0].points[i]
-        pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    for lbl, cnt, y in [("Videos",fb_video_c,2.10),("Photos",fb_photo_c,3.25),("Links",fb_link_c,4.40)]:
-        pct = int(round(cnt/fb_total*100))
-        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
-    card(s, 6.85, 5.55, 5.60, 1.00, "Facebook Strength", fb.get("strength",""), dark_bg=dark)
-    footer_bar(s, 9, dark_bg=dark)
-
-    # ── SLIDE 10: Facebook Photos Performance (light) ───────────
-    fb_photos = fb_raw.get("photos", {})
-    s, dark = start_slide(prs, blank, 10)
-    kicker_header(s, "Facebook — Photos", "Photos Performance",
-                  f"Based on {fb_photos.get('n',0)} photo posts from the last {fb_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, fb_photos.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, fb_photos.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, fb_photos.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
-    stat_block(s, 0.55, 3.10, 3.86, fb_photos.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.10, 3.86, fb_photos.get("avg_shares","N/A"), "Avg Shares / Post", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.10, 3.86, fb_raw.get("engagement_rate","N/A"), "Overall Engagement Rate", size=32, dark_bg=dark)
-    card_url(s, 0.55, 4.75, 5.95, 1.75,
-             f"Top-Performing Photo (score {fb_photos.get('top_score','N/A')})",
-             fb_photos.get("top_url","N/A"), dark_bg=dark)
-    card_url(s, 6.65, 4.75, 5.80, 1.75,
-             f"Lowest-Performing Photo (score {fb_photos.get('worst_score','N/A')})",
-             fb_photos.get("worst_url","N/A"), dark_bg=dark)
-    footer_bar(s, 10, dark_bg=dark)
-
-    # ── SLIDE 11: Facebook Videos Performance (dark) ────────────
-    fb_videos = fb_raw.get("videos", {})
-    s, dark = start_slide(prs, blank, 11)
-    kicker_header(s, "Facebook — Videos", "Videos Performance",
-                  f"Based on {fb_videos.get('n',0)} videos from the last {fb_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, fb_videos.get("avg_engagement","N/A"), "Avg Engagement / Video", size=40, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, fb_videos.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=40, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, fb_videos.get("avg_views","N/A"), "Avg Views / Video", size=40, dark_bg=dark)
-    stat_block(s, 0.55, 2.95, 3.86, fb_videos.get("avg_likes","N/A"), "Avg Likes / Video", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 2.95, 3.86, fb_videos.get("avg_comments","N/A"), "Avg Comments / Video", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 2.95, 3.86, fb_videos.get("avg_shares","N/A"), "Avg Shares / Video", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 4.05, 3.86, fb_videos.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 4.05, 3.86, fb_videos.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 4.05, 3.86, fb_videos.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 5.15, 3.86, fb_videos.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
-    link_list_card(s, 0.55, 6.10, 12.23, 0.92, "Top / Worst / Max Views", [
-        (f"Top video (score {fb_videos.get('top_score','N/A')}):  ",     fb_videos.get("top_url","N/A")),
-        (f"Worst video (score {fb_videos.get('worst_score','N/A')}):  ", fb_videos.get("worst_url","N/A")),
-        (f"Max views ({fb_videos.get('max_views','N/A')}):  ",           fb_videos.get("max_views_url","N/A")),
-    ], dark_bg=dark)
-    footer_bar(s, 11, dark_bg=dark)
-
-    # ── SLIDE 12: YouTube Overview (light) ──────────────────────
-    yt_shorts = yt_raw.get("shorts", {})
-    yt_videos = yt_raw.get("videos_performance", {})
-    s, dark = start_slide(prs, blank, 12)
-    kicker_header(s, "YouTube", "YouTube Overview",
-                  f"{yt_raw.get('handle', handles.get('youtube','N/A'))}  ·  Based on last {yt_raw.get('sample_size','N/A')} videos", dark_bg=dark)
-
-    stat_block(s, 0.55, 1.75, 3.86, yt_raw.get("subscribers","N/A"), "Subscribers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, yt_raw.get("sample_size","N/A"), "Videos Analyzed", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, yt_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
-    stat_block(s, 0.55, 3.15, 3.86, yt_raw.get("engagement_rate","N/A"), "Engagement Rate / Subscriber", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.15, 3.86, yt_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.15, 3.86, yt_raw.get("views","N/A"), "Total Views (All-Time)", size=32, dark_bg=dark)
-
-    yt_divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
-    ln12 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
-    ln12.fill.solid(); ln12.fill.fore_color.rgb = yt_divider_color; ln12.line.fill.background()
-
-    yt_sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
-    tb(s, f"Most Frequent Hour: {yt_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {yt_raw.get('best_performing_hour','N/A')}",
-       0.55, 4.24, 12.23, 0.24, size=12, color=yt_sub_color, font=FONT_MONO_LT)
-    tb(s, f"Posting Consistency: {yt_raw.get('posting_consistency','N/A')}",
-       0.55, 4.50, 5.95, 0.24, size=12, color=yt_sub_color, font=FONT_MONO_LT)
-
-    yt_momentum_direction = yt_raw.get("momentum_direction")
-    yt_momentum_pct       = yt_raw.get("momentum_pct", "N/A")
-    if yt_momentum_direction == "up":
-        yt_momentum_color, yt_momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {yt_momentum_pct}"
-    elif yt_momentum_direction == "down":
-        yt_momentum_color, yt_momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {yt_momentum_pct}"
-    else:
-        yt_momentum_color, yt_momentum_text = yt_sub_color,   f"Momentum: {yt_momentum_pct}"
-    tb(s, yt_momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=yt_momentum_color, font=FONT_MONO_MED)
-
-    yt_analysis_text = truncate_to_sentence(analysis.get("youtube_analysis",""), max_chars=480)
-    card(s, 0.55, 4.86, 12.23, 1.55, "YouTube Analysis", yt_analysis_text, dark_bg=dark)
-
-    tb(s, f"Most Active Day: {yt_raw.get('most_active_day','N/A')}   ·   Least Active Day: {yt_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
-       0.55, 6.50, 12.23, 0.22, size=11, color=yt_sub_color, font=FONT_MONO_LT)
-
-    yt_outlier_note = yt_raw.get("outlier_note")
-    if yt_outlier_note:
-        tb(s, yt_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
-
+    for lbl, cnt, y in [("Photos",fb_photo_c,1.95),("Videos",fb_video_c,3.05),("Links",fb_link_c,4.15)]:
+        stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/fb_total*100))}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
+    card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", T("facebook_content_analysis"), dark_bg=dark, body_size=11.5)
     footer_bar(s, 12, dark_bg=dark)
 
-    # ── SLIDE 13: YouTube Content Strategy — Shorts vs Videos ───
-    s, dark = start_slide(prs, blank, 13)
+    # ── SLIDE 13: FB Photos (dark) ─────────────────────────────
+    format_perf_slide(13, "Facebook — Photos", "Photos Performance", fb_photos,
+                      fb_raw.get("sample_size",30), "photo posts", T("facebook_photos_analysis"))
+
+    # ── SLIDE 14: FB Videos Performance (light) ────────────────
+    s, dark = start_slide(prs, blank, 14)
+    kicker_header(s, "Facebook — Videos", "Videos Performance",
+                  f"Based on {fb_videos.get('n',0)} videos from the last {fb_raw.get('sample_size',30)}", dark_bg=dark)
+    stat_block(s, 0.55, 1.85, 3.86, fb_videos.get("er_by_view","N/A"), "Engagement Rate by View", size=44, dark_bg=dark)
+    stat_block(s, 4.73, 1.85, 3.86, fb_videos.get("avg_engagement","N/A"), "Avg Engagement / Video", size=44, dark_bg=dark)
+    stat_block(s, 8.92, 1.85, 3.86, fb_videos.get("avg_views","N/A"), "Avg Views / Video", size=44, dark_bg=dark)
+    stat_block(s, 0.55, 3.45, 3.86, fb_videos.get("avg_likes","N/A"), "Avg Likes / Video", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.45, 3.86, fb_videos.get("avg_comments","N/A"), "Avg Comments / Video", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.45, 3.86, fb_videos.get("er_per_follower","N/A"), "Engagement Rate / Followers", size=32, dark_bg=dark)
+    stat_block(s, 0.55, 5.00, 3.86, fb_videos.get("like_rate","N/A"), "Like Rate (per view)", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 5.00, 3.86, fb_videos.get("comment_rate","N/A"), "Comment Rate (per view)", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 5.00, 3.86, fb_videos.get("er_estimated","N/A"), "Estimated ER / Followers", size=32, dark_bg=dark)
+    footer_bar(s, 14, dark_bg=dark)
+
+    # ── SLIDE 15: FB Videos Deep Dive (dark) ───────────────────
+    deep_dive_slide(15, "Facebook — Videos", "Videos Deep Dive", fb_videos,
+                    T("facebook_videos_analysis"), unit="video")
+
+    # ── SLIDE 16: FB Format Comparison (light) ─────────────────
+    s, dark = start_slide(prs, blank, 16)
+    kicker_header(s, "Facebook", "Format Comparison",
+                  "Engagement rate per follower across the three formats", dark_bg=dark)
+    rounded_table(s, ["Format", "Posts", "ER / Followers", "Estimated ER"], [
+        ["Videos", fb_videos.get("n",0), fb_videos.get("er_per_follower","N/A"), fb_videos.get("er_estimated","N/A")],
+        ["Photos", fb_photos.get("n",0), fb_photos.get("er_per_follower","N/A"), fb_photos.get("er_estimated","N/A")],
+        ["Links",  fb_links.get("n",0),  fb_links.get("er_per_follower","N/A"),  fb_links.get("er_estimated","N/A")],
+    ], 0.55, 1.75, 12.23, dark_bg=dark)
+    card(s, 0.55, 4.55, 12.23, 2.30, "What Works Best", T("facebook_comparison_analysis"), dark_bg=dark)
+    footer_bar(s, 16, dark_bg=dark)
+
+    # ── SLIDE 17: FB Summary (dark) ────────────────────────────
+    summary_slide(17, "Facebook", "Facebook Summary", [
+        ("Audience", f"{usfmt(fb_raw.get('followers','N/A'))} followers"),
+        ("Performance", f"Avg engagement {fb_raw.get('avg_engagement','N/A')} / post · videos {fb_videos.get('er_by_view','N/A')} ER by view · momentum {fb_raw.get('momentum_pct','N/A')}"),
+        ("Cadence", f"{fb_raw.get('posting_frequency','N/A')} · {fb_raw.get('posting_consistency','N/A')} · best hour {fb_raw.get('best_performing_hour','N/A')} · best day {fb_raw.get('best_performing_day','N/A')}"),
+        ("Strongest Format", str(fb.get("strength","N/A"))),
+        ("Overall Facebook Analysis", T("facebook_summary")),
+    ])
+
+    # ── SLIDE 18: YouTube Overview (light) ─────────────────────
+    overview_slide(18, "YouTube", "YouTube Overview",
+        f"{yt_raw.get('handle', handles.get('youtube','N/A'))}  ·  Based on last {yt_raw.get('sample_size','N/A')} videos",
+        [(usfmt(yt_raw.get("subscribers","N/A")), "Subscribers", 54),
+         (str(yt_raw.get("sample_size","N/A")), "Videos Analyzed", 54),
+         (yt_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
+        [(yt_raw.get("engagement_rate","N/A"), "Engagement Rate / Subscriber", 32),
+         (yt_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Videos)", 32),
+         (yt_raw.get("avg_views_sample","N/A"), "Avg Views / Video (Total ÷ Videos)", 32)],
+        yt_raw, T("youtube_analysis"))
+
+    # ── SLIDE 19: YT Content Strategy (dark) ───────────────────
+    s, dark = start_slide(prs, blank, 19)
     kicker_header(s, "YouTube", "Content Strategy",
                   f"Content mix from the last {yt_raw.get('sample_size',30)} videos", dark_bg=dark)
     yt_shorts_c = yt_raw.get("shorts_count",0); yt_videos_c = yt_raw.get("videos_count",0)
     yt_total = max(yt_shorts_c + yt_videos_c, 1)
-    yt_cd = ChartData()
-    yt_cd.categories = ["Shorts","Videos"]
-    yt_cd.add_series("Videos",(yt_shorts_c, yt_videos_c))
-    yt_chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.85),Inches(5.40),Inches(4.50),yt_cd).chart
-    yt_chart.has_legend = True
-    for i, col in enumerate([GOLD, CARD_DARK if not dark else RGBColor(0x3A,0x3A,0x3A)]):
-        pt = yt_chart.plots[0].series[0].points[i]
+    cd = ChartData(); cd.categories = ["Shorts","Videos"]
+    cd.add_series("Videos",(yt_shorts_c, yt_videos_c))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
+    chart.has_legend = True
+    for i, col in enumerate([GOLD, RGBColor(0x3A,0x3A,0x3A)]):
+        pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    for lbl, cnt, y in [("Shorts",yt_shorts_c,2.60),("Videos",yt_videos_c,4.00)]:
-        pct = int(round(cnt/yt_total*100))
-        stat_block(s, 6.85, y, 5.40, f"{pct}%", f"{lbl} — {cnt} video{'s' if cnt != 1 else ''}", size=40, dark_bg=dark)
-    footer_bar(s, 13, dark_bg=dark)
+    for lbl, cnt, y in [("Shorts",yt_shorts_c,2.30),("Videos",yt_videos_c,3.70)]:
+        stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/yt_total*100))}%",
+                   f"{lbl} — {cnt} video{'s' if cnt != 1 else ''}", size=40, dark_bg=dark)
+    card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", T("youtube_content_analysis"), dark_bg=dark, body_size=11.5)
+    footer_bar(s, 19, dark_bg=dark)
 
-    # ── SLIDE 14: Shorts Performance (light) ────────────────────
-    s, dark = start_slide(prs, blank, 14)
-    kicker_header(s, "YouTube — Shorts", "Shorts Performance",
-                  f"Based on {yt_shorts.get('n',0)} Shorts from the last {yt_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, yt_shorts.get("avg_engagement","N/A"), "Avg Engagement / Short", size=40, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, yt_shorts.get("er_per_follower","N/A"), "Engagement Rate / Subscriber", size=40, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, yt_shorts.get("avg_views","N/A"), "Avg Views / Short", size=40, dark_bg=dark)
-    stat_block(s, 0.55, 2.95, 3.86, yt_shorts.get("avg_likes","N/A"), "Avg Likes / Short", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 2.95, 3.86, yt_shorts.get("avg_comments","N/A"), "Avg Comments / Short", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 2.95, 3.86, yt_shorts.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 4.05, 3.86, yt_shorts.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 4.05, 3.86, yt_shorts.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 4.05, 3.86, yt_shorts.get("n",0), "Shorts in Sample", size=28, dark_bg=dark)
-    link_list_card(s, 0.55, 5.15, 12.23, 0.92, "Top / Worst / Max Views", [
-        (f"Top Short (score {yt_shorts.get('top_score','N/A')}):  ",     yt_shorts.get("top_url","N/A")),
-        (f"Worst Short (score {yt_shorts.get('worst_score','N/A')}):  ", yt_shorts.get("worst_url","N/A")),
-        (f"Max views ({yt_shorts.get('max_views','N/A')}):  ",           yt_shorts.get("max_views_url","N/A")),
-    ], dark_bg=dark)
-    footer_bar(s, 14, dark_bg=dark)
+    # ── YT stats slide (shared by Shorts & Videos) ─────────────
+    def yt_stats_slide(n, kicker, title, d, sample, unit):
+        s, dark = start_slide(prs, blank, n)
+        kicker_header(s, kicker, title,
+                      f"Based on {d.get('n',0)} {unit} from the last {sample}", dark_bg=dark)
+        stat_block(s, 0.55, 1.85, 3.86, d.get("er_by_view","N/A"), "Engagement Rate by View", size=44, dark_bg=dark)
+        stat_block(s, 4.73, 1.85, 3.86, d.get("avg_engagement","N/A"), "Avg Engagement", size=44, dark_bg=dark)
+        stat_block(s, 8.92, 1.85, 3.86, d.get("avg_views","N/A"), "Avg Views", size=44, dark_bg=dark)
+        stat_block(s, 0.55, 3.45, 3.86, d.get("avg_likes","N/A"), "Avg Likes", size=32, dark_bg=dark)
+        stat_block(s, 4.73, 3.45, 3.86, d.get("avg_comments","N/A"), "Avg Comments", size=32, dark_bg=dark)
+        stat_block(s, 8.92, 3.45, 3.86, d.get("er_per_follower","N/A"), "Engagement Rate / Subscriber", size=32, dark_bg=dark)
+        stat_block(s, 0.55, 5.00, 3.86, d.get("like_rate","N/A"), "Like Rate (per view)", size=32, dark_bg=dark)
+        stat_block(s, 4.73, 5.00, 3.86, d.get("comment_rate","N/A"), "Comment Rate (per view)", size=32, dark_bg=dark)
+        footer_bar(s, n, dark_bg=dark)
 
-    # ── SLIDE 15: Videos (long-form) Performance (dark) ─────────
-    s, dark = start_slide(prs, blank, 15)
-    kicker_header(s, "YouTube — Videos", "Videos Performance",
-                  f"Based on {yt_videos.get('n',0)} long-form videos from the last {yt_raw.get('sample_size',30)}", dark_bg=dark)
-    stat_block(s, 0.55, 1.75, 3.86, yt_videos.get("avg_engagement","N/A"), "Avg Engagement / Video", size=40, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, yt_videos.get("er_per_follower","N/A"), "Engagement Rate / Subscriber", size=40, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, yt_videos.get("avg_views","N/A"), "Avg Views / Video", size=40, dark_bg=dark)
-    stat_block(s, 0.55, 2.95, 3.86, yt_videos.get("avg_likes","N/A"), "Avg Likes / Video", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 2.95, 3.86, yt_videos.get("avg_comments","N/A"), "Avg Comments / Video", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 2.95, 3.86, yt_videos.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 4.05, 3.86, yt_videos.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 4.73, 4.05, 3.86, yt_videos.get("er_by_view","N/A"), "Engagement Rate by View", size=28, dark_bg=dark)
-    stat_block(s, 8.92, 4.05, 3.86, yt_videos.get("n",0), "Videos in Sample", size=28, dark_bg=dark)
-    link_list_card(s, 0.55, 5.15, 12.23, 0.92, "Top / Worst / Max Views", [
-        (f"Top video (score {yt_videos.get('top_score','N/A')}):  ",     yt_videos.get("top_url","N/A")),
-        (f"Worst video (score {yt_videos.get('worst_score','N/A')}):  ", yt_videos.get("worst_url","N/A")),
-        (f"Max views ({yt_videos.get('max_views','N/A')}):  ",           yt_videos.get("max_views_url","N/A")),
-    ], dark_bg=dark)
-    # vpv_str (Views Per Video, all-time estimate) is still needed by
-    # the Engagement Benchmarks table further down — kept from the old
-    # slide 13 logic so that reference doesn't break.
-    try:
-        vpv = int(str(yt_raw.get("views","0")).replace(",","")) // max(int(str(yt_raw.get("videos","1")).replace(",","")),1)
-        vpv_str = f"{vpv:,}"
-    except:
-        vpv_str = "N/A"
-    footer_bar(s, 15, dark_bg=dark)
+    # ── SLIDES 20-23: YT Shorts & Videos, each split in two ────
+    yt_stats_slide(20, "YouTube — Shorts", "Shorts Performance", yt_shorts,
+                   yt_raw.get("sample_size",30), "Shorts")
+    deep_dive_slide(21, "YouTube — Shorts", "Shorts Deep Dive", yt_shorts,
+                    T("youtube_shorts_analysis"), unit="Short")
+    yt_stats_slide(22, "YouTube — Videos", "Videos Performance", yt_videos,
+                   yt_raw.get("sample_size",30), "long-form videos")
+    deep_dive_slide(23, "YouTube — Videos", "Videos Deep Dive", yt_videos,
+                    T("youtube_videos_analysis"), unit="video")
 
-    # ── SLIDE 16: LinkedIn Overview (light) ─────────────────────
-    li_categories = li_raw.get("categories", {})
-    s, dark = start_slide(prs, blank, 16)
-    kicker_header(s, "LinkedIn", "LinkedIn Overview",
-                  f"{handles.get('linkedin','N/A')}  ·  Based on last {li_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+    # ── SLIDE 24: YT Shorts vs Videos chart (light) ────────────
+    s, dark = start_slide(prs, blank, 24)
+    kicker_header(s, "YouTube", "Shorts vs Videos", "Comparing the two formats head-to-head", dark_bg=dark)
+    def _views_num(v):
+        try: return int(str(v).replace(",",""))
+        except: return 0
+    cd = ChartData(); cd.categories = ["Shorts", "Long-form Videos"]
+    cd.add_series("Avg Views", (_views_num(yt_shorts.get("avg_views",0)), _views_num(yt_videos.get("avg_views",0))))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55), Inches(1.80),
+                                Inches(6.40), Inches(3.40), cd).chart
+    chart.has_legend = False
+    ser = chart.plots[0].series[0]
+    for i in range(2):
+        ser.points[i].format.fill.solid(); ser.points[i].format.fill.fore_color.rgb = GOLD
+    chart.category_axis.tick_labels.font.size = Pt(11)
+    chart.value_axis.tick_labels.font.size = Pt(10)
+    tb(s, "AVG VIEWS PER UPLOAD", 0.55, 5.25, 6.00, 0.30, size=9.5,
+       color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
+    stat_block(s, 7.45, 1.95, 5.00, yt_shorts.get("er_by_view","N/A"), "Shorts — ER by View", size=36, dark_bg=dark)
+    stat_block(s, 7.45, 3.15, 5.00, yt_videos.get("er_by_view","N/A"), "Videos — ER by View", size=36, dark_bg=dark)
+    sv = _views_num(yt_shorts.get("avg_views",0)); vv = _views_num(yt_videos.get("avg_views",0))
+    ratio = f"{(vv/sv):.1f}x" if (sv and vv and vv >= sv) else (f"{(sv/vv):.1f}x" if (sv and vv) else "N/A")
+    ratio_label = "Long-form View Advantage" if (sv and vv and vv >= sv) else "Shorts View Advantage"
+    stat_block(s, 7.45, 4.35, 5.00, ratio, ratio_label, size=36, dark_bg=dark)
+    card(s, 0.55, 5.70, 12.23, 1.20, "Analysis", T("youtube_comparison_analysis"), dark_bg=dark, body_size=11.5)
+    footer_bar(s, 24, dark_bg=dark)
 
-    stat_block(s, 0.55, 1.75, 3.86, li_raw.get("followers","N/A"), "Followers", size=54, dark_bg=dark)
-    stat_block(s, 4.73, 1.75, 3.86, li_raw.get("sample_size","N/A"), "Posts Analyzed", size=54, dark_bg=dark)
-    stat_block(s, 8.92, 1.75, 3.86, li_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
-    stat_block(s, 0.55, 3.15, 3.86, li_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 3.15, 3.86, li_raw.get("engagement_total","N/A"), "Engagement", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 3.15, 3.86, li_raw.get("employees","N/A"), "Employees", size=32, dark_bg=dark)
+    # ── SLIDE 25: LinkedIn Overview (dark) — no Employees ──────
+    overview_slide(25, "LinkedIn", "LinkedIn Overview",
+        f"{handles.get('linkedin','N/A')}  ·  Based on last {li_raw.get('sample_size','N/A')} posts",
+        [(usfmt(li_raw.get("followers","N/A")), "Followers", 54),
+         (str(li_raw.get("sample_size","N/A")), "Posts Analyzed", 54),
+         (li_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
+        [(li_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", 32),
+         (li_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", 32),
+         (li_raw.get("engagement_total","N/A"), "Total Engagement", 32)],
+        li_raw, T("linkedin_analysis"))
 
-    li_divider_color = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
-    ln14 = s.shapes.add_shape(1, Inches(0.55), Inches(4.12), Inches(12.23), Pt(0.75))
-    ln14.fill.solid(); ln14.fill.fore_color.rgb = li_divider_color; ln14.line.fill.background()
-
-    li_sub_color = TEXT_GRAY_LT if dark else TEXT_GRAY
-    tb(s, f"Most Frequent Hour: {li_raw.get('most_frequent_hour','N/A')}   ·   Best Performing Hour: {li_raw.get('best_performing_hour','N/A')}",
-       0.55, 4.24, 12.23, 0.24, size=12, color=li_sub_color, font=FONT_MONO_LT)
-    tb(s, f"Posting Consistency: {li_raw.get('posting_consistency','N/A')}",
-       0.55, 4.50, 5.95, 0.24, size=12, color=li_sub_color, font=FONT_MONO_LT)
-
-    li_momentum_direction = li_raw.get("momentum_direction")
-    li_momentum_pct       = li_raw.get("momentum_pct", "N/A")
-    if li_momentum_direction == "up":
-        li_momentum_color, li_momentum_text = MOMENTUM_UP,   f"Momentum: \u25B2 {li_momentum_pct}"
-    elif li_momentum_direction == "down":
-        li_momentum_color, li_momentum_text = MOMENTUM_DOWN, f"Momentum: \u25BC {li_momentum_pct}"
-    else:
-        li_momentum_color, li_momentum_text = li_sub_color,   f"Momentum: {li_momentum_pct}"
-    tb(s, li_momentum_text, 6.60, 4.50, 5.65, 0.24, size=12, bold=True, color=li_momentum_color, font=FONT_MONO_MED)
-
-    li_analysis_text = truncate_to_sentence(analysis.get("linkedin_analysis",""), max_chars=480)
-    card(s, 0.55, 4.86, 12.23, 1.55, "LinkedIn Analysis", li_analysis_text, dark_bg=dark)
-
-    tb(s, f"Most Active Day: {li_raw.get('most_active_day','N/A')}   ·   Least Active Day: {li_raw.get('least_active_day','N/A')}   ·   (all dates in UTC)",
-       0.55, 6.50, 12.23, 0.22, size=11, color=li_sub_color, font=FONT_MONO_LT)
-
-    li_outlier_note = li_raw.get("outlier_note")
-    if li_outlier_note:
-        tb(s, li_outlier_note, 0.55, 6.74, 12.23, 0.22, size=11, color=GOLD, font=FONT_MONO_LT)
-
-    footer_bar(s, 16, dark_bg=dark)
-
-    # ── SLIDE 17: LinkedIn Content Strategy — 7-category pie ────
-    s, dark = start_slide(prs, blank, 17)
-    kicker_header(s, "LinkedIn", "Content Strategy",
-                  f"Content mix from the last {li_raw.get('sample_size',30)} posts", dark_bg=dark)
-
+    # ── SLIDE 26: LI Content Strategy (light) ──────────────────
     li_cat_order = [
         ("videos",       "Videos"),
         ("multi_image",  "Multi-Image"),
@@ -2793,130 +2686,187 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         ("documents",    "Documents"),
         ("polls",        "Polls"),
         ("text_only",    "Text-Only"),
-        ("other",        "Other"),
+        ("other",        "Others (Articles, Newsletters)"),
     ]
+    s, dark = start_slide(prs, blank, 26)
+    kicker_header(s, "LinkedIn", "Content Strategy",
+                  f"Content mix from the last {li_raw.get('sample_size',30)} posts", dark_bg=dark)
     li_counts = [li_categories.get(key, {}).get("n", 0) for key, _ in li_cat_order]
     li_total  = max(sum(li_counts), 1)
-
-    li_cd = ChartData()
-    li_cd.categories = [label for _, label in li_cat_order]
-    li_cd.add_series("Posts", tuple(li_counts))
-    li_chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.55),Inches(1.85),Inches(5.90),Inches(4.60),li_cd).chart
-    li_chart.has_legend = True
-    li_chart.legend.font.size = Pt(9)
-    LINKEDIN_PIE_COLORS = [
-        GOLD, RGBColor(0x8B,0x6F,0x47), CARD_DARK if not dark else RGBColor(0x3A,0x3A,0x3A),
-        PIE_TAN, RGBColor(0x6B,0x59,0x40), RGBColor(0xA8,0xA2,0x96), RGBColor(0x4A,0x38,0x26),
-    ]
-    for i, col in enumerate(LINKEDIN_PIE_COLORS):
-        pt = li_chart.plots[0].series[0].points[i]
+    cd = ChartData(); cd.categories = [label for _, label in li_cat_order]
+    cd.add_series("Posts", tuple(li_counts))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.55),Inches(1.80),Inches(5.40),Inches(3.90),cd).chart
+    chart.has_legend = True; chart.legend.font.size = Pt(9)
+    LI_COLORS = [GOLD, RGBColor(0x8B,0x6F,0x47), CARD_DARK, PIE_TAN,
+                 RGBColor(0x6B,0x59,0x40), RGBColor(0xA8,0xA2,0x96), RGBColor(0x4A,0x38,0x26)]
+    for i, col in enumerate(LI_COLORS):
+        pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-
-    # Compact 7-row list, right of the pie — a full stat_block per
-    # category (like Instagram's 3-slice version) wouldn't fit 7 rows
-    # cleanly, so this uses smaller text rows instead.
-    li_list_y = 1.95
+    yy = 1.90
     for key, label in li_cat_order:
         cnt = li_categories.get(key, {}).get("n", 0)
-        pct = int(round(cnt / li_total * 100))
-        tb(s, f"{label}", 6.70, li_list_y, 3.20, 0.30, size=13, bold=True,
+        tb(s, label, 6.45, yy, 3.65, 0.30, size=12, bold=True,
            color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_MONO_MED)
-        tb(s, f"{pct}%  —  {cnt} post{'s' if cnt != 1 else ''}", 10.00, li_list_y, 2.78, 0.30,
-           size=13, color=GOLD, font=FONT_MONO_MED)
-        li_list_y += 0.44
+        tb(s, f"{int(round(cnt/li_total*100))}%  —  {cnt} post{'s' if cnt != 1 else ''}",
+           10.15, yy, 2.60, 0.30, size=12, color=GOLD, font=FONT_MONO_MED)
+        yy += 0.40
+    card(s, 0.55, 5.90, 12.23, 1.05, "Content Strategy Analysis",
+         T("linkedin_content_analysis", max_chars=300), dark_bg=dark, body_size=11)
+    footer_bar(s, 26, dark_bg=dark)
 
-    footer_bar(s, 17, dark_bg=dark)
+    # ── SLIDES 27-33: LI per-format performance (analysis, no count stat) ──
+    li_cat_analyses = A.get("linkedin_category_analyses", {}) or {}
+    li_sample = li_raw.get("sample_size", 30)
+    for idx, (key, label) in enumerate(li_cat_order):
+        n = 27 + idx
+        d = li_categories.get(key, {"n": 0})
+        s, dark = start_slide(prs, blank, n)
+        kicker_header(s, f"LinkedIn — {label}", f"{label} Performance",
+                      f"Based on {d.get('n',0)} post{'s' if d.get('n',0) != 1 else ''} from the last {li_sample}",
+                      dark_bg=dark)
+        if d.get("n", 0) > 0:
+            stat_block(s, 0.55, 1.75, 3.86, d.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
+            stat_block(s, 4.73, 1.75, 3.86, d.get("er_per_follower","N/A"), "Engagement Rate / Follower", size=44, dark_bg=dark)
+            stat_block(s, 8.92, 1.75, 3.86, d.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
+            stat_block(s, 0.55, 3.10, 3.86, d.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
+            stat_block(s, 4.73, 3.10, 3.86, d.get("avg_shares","N/A"), "Avg Reposts / Post", size=32, dark_bg=dark)
+            link_list_card(s, 0.55, 4.20, 12.23, 0.85, "Top / Worst", [
+                (f"Top (score {d.get('top_score','N/A')}):  ", d.get("top_url","N/A")),
+                (f"Worst (score {d.get('worst_score','N/A')}):  ", d.get("worst_url","N/A")),
+            ], dark_bg=dark)
+        else:
+            card(s, 0.55, 1.90, 12.23, 1.60, "No Posts in This Category",
+                 f"No {label.lower()} posts appeared in the sample of LinkedIn posts analyzed for this report.",
+                 dark_bg=dark)
+        cat_analysis = truncate_to_sentence(str(li_cat_analyses.get(key, "") or ""), max_chars=420)
+        card(s, 0.55, 5.30, 12.23, 1.55, "Analysis", cat_analysis, dark_bg=dark)
+        footer_bar(s, n, dark_bg=dark)
 
-    # ── SLIDES 18-24: LinkedIn Performance — one per content type ──
-    li_sample_size = li_raw.get("sample_size", 30)
-    for i, (key, label) in enumerate(li_cat_order):
-        linkedin_performance_slide(
-            prs, blank, 18 + i, label,
-            li_categories.get(key, {"n": 0}),
-            li_sample_size
-        )
+    # ── SLIDE 34: LI Format Comparison (light) ─────────────────
+    s, dark = start_slide(prs, blank, 34)
+    kicker_header(s, "LinkedIn", "Format Comparison",
+                  "Engagement rate per follower across all formats", dark_bg=dark)
+    rows = []
+    for key, label in li_cat_order:
+        d = li_categories.get(key, {"n": 0})
+        rows.append([label, d.get("n", 0), d.get("er_per_follower","—") if d.get("n",0) else "—",
+                     d.get("avg_engagement","—") if d.get("n",0) else "—"])
+    def _er_num(v):
+        try: return float(str(v).replace("%",""))
+        except: return -1
+    rows.sort(key=lambda r: _er_num(r[2]), reverse=True)
+    rounded_table(s, ["Format", "Posts", "ER / Followers", "Avg Engagement"], rows,
+                  0.55, 1.72, 12.23, dark_bg=dark, row_h=0.44)
+    card(s, 0.55, 6.05, 12.23, 1.00, "What Works Best",
+         T("linkedin_comparison_analysis", max_chars=300), dark_bg=dark, body_size=11)
+    footer_bar(s, 34, dark_bg=dark)
 
-    # ── SLIDE 25: Cross-Platform Comparison (dark) ──────────────
-    s, dark = start_slide(prs, blank, 25)
+    # ── SLIDE 35: LI Summary (dark) ────────────────────────────
+    summary_slide(35, "LinkedIn", "LinkedIn Summary", [
+        ("Audience", f"{usfmt(li_raw.get('followers','N/A'))} followers · core B2B channel"),
+        ("Performance", f"ER {li_raw.get('engagement_rate','N/A')} per follower · avg engagement {li_raw.get('avg_engagement','N/A')} / post · momentum {li_raw.get('momentum_pct','N/A')}"),
+        ("Cadence", f"{li_raw.get('posting_frequency','N/A')} · {li_raw.get('posting_consistency','N/A')} · best day {li_raw.get('best_performing_day','N/A')}, {li_raw.get('best_performing_hour','N/A')}"),
+        ("Strongest Format", str(li.get("strength","N/A"))),
+        ("Overall LinkedIn Analysis", T("linkedin_summary")),
+    ])
+
+    # ── SLIDE 36: Cross-Platform Follower Comparison (light) ───
+    s, dark = start_slide(prs, blank, 36)
     kicker_header(s, "Cross-Platform", "Follower Comparison", "Audience size across all platforms", dark_bg=dark)
     ig_f = parse_num(ig_raw.get("followers",0)); fb_f = parse_num(fb_raw.get("followers",0))
     yt_f = parse_num(yt_raw.get("subscribers",0)); li_f = parse_num(li_raw.get("followers",0))
-    cd2 = ChartData()
-    cd2.categories = ["Instagram","Facebook","YouTube","LinkedIn"]
-    cd2.add_series("Followers",(ig_f,fb_f,yt_f,li_f))
-    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED,
-                                 Inches(0.55),Inches(1.75),Inches(12.23),Inches(3.65),cd2).chart
-    chart2.has_legend = False
-    pt0 = chart2.plots[0].series[0]
+    cd = ChartData(); cd.categories = ["Instagram","Facebook","YouTube","LinkedIn"]
+    cd.add_series("Followers",(ig_f,fb_f,yt_f,li_f))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED,
+                                Inches(0.55),Inches(1.75),Inches(12.23),Inches(3.55),cd).chart
+    chart.has_legend = False
+    ser = chart.plots[0].series[0]
     for i in range(4):
-        pt0.points[i].format.fill.solid(); pt0.points[i].format.fill.fore_color.rgb = GOLD
-    chart2.category_axis.tick_labels.font.size = Pt(11)
-    chart2.category_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
-    chart2.value_axis.tick_labels.font.size = Pt(10)
-    chart2.value_axis.tick_labels.font.color.rgb = TEXT_GRAY_LT
+        ser.points[i].format.fill.solid(); ser.points[i].format.fill.fore_color.rgb = GOLD
+    chart.category_axis.tick_labels.font.size = Pt(11)
+    chart.value_axis.tick_labels.font.size = Pt(10)
     for i,(lbl,val) in enumerate([
-        ("Instagram", ig_raw.get("followers","N/A")),
-        ("Facebook",  fb_raw.get("followers","N/A")),
-        ("YouTube",   yt_raw.get("subscribers","N/A")),
-        ("LinkedIn",  li_raw.get("followers","N/A")),
+        ("Instagram", usfmt(ig_raw.get("followers","N/A"))),
+        ("Facebook",  usfmt(fb_raw.get("followers","N/A"))),
+        ("YouTube",   usfmt(yt_raw.get("subscribers","N/A"))),
+        ("LinkedIn",  usfmt(li_raw.get("followers","N/A"))),
     ]):
-        stat_block(s, 0.55 + i*3.13, 5.65, 2.83, val, lbl, size=32, dark_bg=dark)
-    footer_bar(s, 25, dark_bg=dark)
+        stat_block(s, 0.55 + i*3.13, 5.55, 2.83, val, lbl, size=32, dark_bg=dark)
+    footer_bar(s, 36, dark_bg=dark)
 
-    # ── SLIDE 26: Engagement Benchmarks (light) ─────────────────
-    s, dark = start_slide(prs, blank, 26)
-    kicker_header(s, "Benchmarks", "Engagement Benchmarks",
-                  "Performance metrics vs. industry standards", dark_bg=dark)
-    def er_status(val):
-        try:
-            v = float(str(val).replace("%",""))
-            return "Strong" if v>=3 else ("Average" if v>=1 else "Low")
-        except: return "—"
-    branded_table(s, ["Platform","Key Metric","Value","Benchmark","Status"], [
-        ["Instagram","Engagement Rate",   ig_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(ig_raw.get("engagement_rate","0"))],
-        ["Instagram","Reels Engagement",  ig_raw.get("engagement_rate_reels","N/A"), ">3% is good",        er_status(ig_raw.get("engagement_rate_reels","0"))],
-        ["Instagram","Posting Frequency", ig_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
-        ["Facebook", "Engagement Rate",   fb_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(fb_raw.get("engagement_rate","0"))],
-        ["Facebook", "Posting Frequency", fb_raw.get("posting_frequency","N/A"),     "3–5 / week",         "—"],
-        ["YouTube",  "Engagement Rate",   yt_raw.get("engagement_rate","N/A"),       ">3% is good",        er_status(yt_raw.get("engagement_rate","0"))],
-        ["YouTube",  "Views / Video",     vpv_str,                                   ">1,000 is good",     "—"],
-        ["LinkedIn", "Engagement Rate",   li_raw.get("engagement_rate","N/A"),       ">2% is good (B2B)",  er_status(li_raw.get("engagement_rate","0"))],
-        ["LinkedIn", "Posting Frequency", li_raw.get("posting_frequency","N/A"),     "2–3 / week",         "—"],
-    ], 0.55, 1.65, 12.23, 4.90, dark_bg=dark)
-    footer_bar(s, 26, dark_bg=dark)
+    # ── SLIDE 37: All-Platform Summary (dark) ──────────────────
+    s, dark = start_slide(prs, blank, 37)
+    kicker_header(s, "All Platforms", "Platform Summary", "The four channels, side by side", dark_bg=dark)
+    rounded_table(s, ["Platform", "Followers", "Engagement", "Frequency", "Momentum"], [
+        ["Instagram", usfmt(ig_raw.get("followers","N/A")), ig_raw.get("engagement_rate","N/A"),
+         ig_raw.get("posting_frequency","N/A"), ig_raw.get("momentum_pct","N/A")],
+        ["Facebook",  usfmt(fb_raw.get("followers","N/A")), fb_raw.get("engagement_rate","N/A"),
+         fb_raw.get("posting_frequency","N/A"), fb_raw.get("momentum_pct","N/A")],
+        ["YouTube",   usfmt(yt_raw.get("subscribers","N/A")), yt_raw.get("engagement_rate","N/A"),
+         yt_raw.get("posting_frequency","N/A"), yt_raw.get("momentum_pct","N/A")],
+        ["LinkedIn",  usfmt(li_raw.get("followers","N/A")), li_raw.get("engagement_rate","N/A"),
+         li_raw.get("posting_frequency","N/A"), li_raw.get("momentum_pct","N/A")],
+    ], 0.55, 1.72, 12.23, dark_bg=dark)
+    card(s, 0.55, 4.60, 12.23, 2.25, "Cross-Platform Summary", T("cross_platform_summary"), dark_bg=dark)
+    footer_bar(s, 37, dark_bg=dark)
 
-    # ── SLIDE 27: Strengths & Gaps (dark) ───────────────────────
-    s, dark = start_slide(prs, blank, 27)
+    # ── SLIDE 38: Strengths & Gaps (light) ─────────────────────
+    s, dark = start_slide(prs, blank, 38)
     kicker_header(s, "Strengths & Gaps", "Key Strengths & Gaps",
                   "What's working, and what needs attention", dark_bg=dark)
-    card(s, 0.55, 1.65, 5.96, 1.35, "Strongest Platform",  cp.get("strongest_platform","N/A"),  dark_bg=dark)
-    card(s, 6.83, 1.65, 5.96, 1.35, "Needs Most Work",     cp.get("weakest_platform","N/A"),    dark_bg=dark)
-    card(s, 0.55, 3.25, 5.96, 1.35, "Content Consistency", cp.get("content_consistency","N/A"), dark_bg=dark)
-    card(s, 6.83, 3.25, 5.96, 1.35, "Growth Opportunity",  cp.get("growth_opportunity","N/A"),  dark_bg=dark)
-    card(s, 0.55, 4.95, 12.23, 1.55, "Overall Summary",    analysis.get("overall_summary","N/A"), dark_bg=dark)
-    footer_bar(s, 27, dark_bg=dark)
+    card(s, 0.55, 1.70, 5.96, 1.40, "Strongest Platform",
+         truncate_to_sentence(str(cp.get("strongest_platform","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 6.83, 1.70, 5.96, 1.40, "Needs Most Work",
+         truncate_to_sentence(str(cp.get("weakest_platform","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 0.55, 3.30, 5.96, 1.40, "Content Consistency",
+         truncate_to_sentence(str(cp.get("content_consistency","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 6.83, 3.30, 5.96, 1.40, "Growth Opportunity",
+         truncate_to_sentence(str(cp.get("growth_opportunity","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 0.55, 4.95, 12.23, 1.85, "Overall Analysis", T("overall_analysis"), dark_bg=dark, body_size=11.5)
+    footer_bar(s, 38, dark_bg=dark)
 
-    # ── SLIDE 28: Recommendations (light) ───────────────────────
-    s, dark = start_slide(prs, blank, 28)
+    # ── SLIDE 39: Recommendations (dark) ───────────────────────
+    s, dark = start_slide(prs, blank, 39)
     tb(s, "ACTION PLAN", 0.55, 0.42, 6.00, 0.30, size=11, color=GOLD, font=FONT_MONO_MED)
-    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65,
-       size=26, color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF)
+    tb(s, "Strategic Recommendations", 0.55, 0.72, 11.50, 0.65, size=26, color=TEXT_LIGHT, font=FONT_SERIF)
     tb(s, "Prioritised next steps by platform", 0.55, 1.34, 11.50, 0.35,
-       size=13, color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO_LT)
-    card(s, 0.55, 1.70, 5.96, 1.30, "Instagram", ig.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 6.83, 1.70, 5.96, 1.30, "YouTube",   yt.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 0.55, 3.30, 5.96, 1.30, "Facebook",  fb.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 6.83, 3.30, 5.96, 1.30, "LinkedIn",  li.get("recommendation","N/A"), dark_bg=dark)
-    card(s, 0.55, 4.95, 12.23, 1.15, "Top Priority", cp.get("overall_recommendation","N/A"), dark_bg=dark)
-    tb(s, f"Report for {brand} ({website_url.replace('https://','').replace('http://','')})  ·  SearchAPI.io + Apify + Claude AI",
-       0.55, 6.35, 12.23, 0.30, size=10, color=TEXT_FOOTER, font=FONT_MONO)
-    footer_bar(s, 28, dark_bg=dark)
+       size=13, color=TEXT_GRAY_LT, font=FONT_MONO_LT)
+    card(s, 0.55, 1.75, 5.96, 1.45, "Instagram", truncate_to_sentence(str(ig.get("recommendation","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 6.83, 1.75, 5.96, 1.45, "YouTube",   truncate_to_sentence(str(yt.get("recommendation","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 0.55, 3.40, 5.96, 1.45, "Facebook",  truncate_to_sentence(str(fb.get("recommendation","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 6.83, 3.40, 5.96, 1.45, "LinkedIn",  truncate_to_sentence(str(li.get("recommendation","N/A")), 220), dark_bg=dark, body_size=11.5)
+    card(s, 0.55, 5.10, 12.23, 1.30, "Top Priority",
+         truncate_to_sentence(str(cp.get("overall_recommendation","N/A")), 420), dark_bg=dark)
+    footer_bar(s, 39, dark_bg=dark)
 
+    # ── SLIDE 40: Thank You (light) ────────────────────────────
+    s, dark = start_slide(prs, blank, 40)
+    tb(s, "Thank You", 0.55, 2.80, 12.23, 1.20, size=54,
+       color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_SERIF, align=PP_ALIGN.CENTER)
+    box = s.shapes.add_textbox(Inches(0.55), Inches(4.30), Inches(12.23), Inches(0.40))
+    p = box.text_frame.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
+    r1 = p.add_run(); r1.text = "Generated by "
+    r1.font.size = Pt(13); r1.font.name = FONT_MONO_LT
+    r1.font.color.rgb = TEXT_GRAY_LT if dark else TEXT_GRAY
+    r2 = p.add_run(); r2.text = "midnightpanda.ai"
+    r2.hyperlink.address = "https://midnightpanda.ai"
+    r2.font.size = Pt(13); r2.font.name = FONT_MONO_MED; r2.font.color.rgb = GOLD
+    tb(s, "AI Brand Intelligence  ·  Competitor Ad Analysis  ·  Social Listening  ·  SEO & Traffic Intelligence",
+       0.55, 4.80, 12.23, 0.35, size=11, color=(TEXT_GRAY_LT if dark else TEXT_GRAY),
+       font=FONT_MONO_LT, align=PP_ALIGN.CENTER)
+    footer_bar(s, 40, dark_bg=dark)
+
+    # ── Save + force gold hyperlink theme ──────────────────────
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
     safe_name = re.sub(r'[^A-Za-z0-9_]', '_', analysis.get("brand_name", website_url).replace(" ","_"))
     path = os.path.join(output_dir, f"{safe_name}_social_report.pptx")
     prs.save(path)
+    try:
+        _force_gold_hyperlinks(path)
+        print("   ✅ Theme hyperlink color forced to gold")
+    except Exception as e:
+        print(f"   ⚠️ Gold hyperlink theme fix failed (links may render blue): {e}")
     print(f"✅ PPT saved: {path}")
     return path, safe_name
 
