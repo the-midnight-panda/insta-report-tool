@@ -605,23 +605,7 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
 
     scored = sorted(posts_group, key=_score, reverse=True)
     top    = scored[0]
-
-    # ── Worst pick fairness rule ─────────────────────────────────
-    # A post must be at least 3 days old to be eligible for "Worst".
-    # A reel posted today has had almost no time to collect likes/
-    # comments/shares, so its low score reflects its age, not its
-    # quality — crowning it "worst" would mislead the client. The Top
-    # pick is NOT filtered: if a brand-new post is already the top
-    # scorer, it earned that early. If every post in the group is
-    # newer than 3 days (very active accounts), fall back to judging
-    # all of them, since there's nothing older to compare against.
-    WORST_MIN_AGE_SECONDS = 3 * 86400
-    now_ts = time.time()
-    eligible_for_worst = [p for p in posts_group
-                          if p.get("ts") is None or (now_ts - p["ts"]) >= WORST_MIN_AGE_SECONDS]
-    if not eligible_for_worst:
-        eligible_for_worst = posts_group
-    worst = min(eligible_for_worst, key=_score)
+    worst  = scored[-1]
 
     result = {
         "n":               n,
@@ -974,39 +958,17 @@ def fetch_instagram(username):
     print(f"📸 Fetching Instagram: @{username}")
     data = {}
     try:
-        # ── Profile data from SearchAPI — WITH RETRIES, NEVER FATAL ───
-        # Previously: a single failed profile call did `return data` and
-        # abandoned Instagram entirely, producing a report where every
-        # Instagram slide showed N/A even though the Apify post scrapers
-        # were healthy (confirmed live 2026-07-18: FB/YT/LI all worked in
-        # the same run). Now: retry up to 3 times with a short pause, and
-        # if the profile STILL can't be fetched, continue with post-level
-        # scraping anyway — followers show N/A but reels/images/carousels
-        # data, top/worst picks, and view-based rates still populate.
-        p = {}
-        ig = {}
-        for attempt in range(3):
-            try:
-                r = requests.get(
-                    "https://www.searchapi.io/api/v1/search",
-                    params={"engine":"instagram_profile","username":username,
-                            "api_key":SEARCHAPI_KEY},
-                    timeout=30
-                )
-                if r.status_code == 200:
-                    ig = r.json()
-                    p  = ig.get("profile", {}) or {}
-                    if p:
-                        break
-                print(f"   ⚠️ Instagram profile attempt {attempt+1} failed "
-                      f"(status {r.status_code}) — retrying..." if attempt < 2 else
-                      f"   ⚠️ Instagram profile attempt {attempt+1} failed (status {r.status_code})")
-            except Exception as e:
-                print(f"   ⚠️ Instagram profile attempt {attempt+1} error: {e}")
-            time.sleep(3)
-        if not p:
-            print("   ⚠️ Instagram profile unavailable after 3 attempts — "
-                  "continuing with post-level data only")
+        # ── Profile data from SearchAPI ───────────────────────────────
+        r = requests.get(
+            "https://www.searchapi.io/api/v1/search",
+            params={"engine":"instagram_profile","username":username,
+                    "api_key":SEARCHAPI_KEY}
+        )
+        if r.status_code != 200:
+            return data
+
+        ig = r.json()
+        p  = ig.get("profile", {})
 
         followers   = p.get("followers", "N/A")
         following   = p.get("following", "N/A")
@@ -1209,30 +1171,15 @@ def fetch_facebook(username):
     print(f"👥 Fetching Facebook: {username}")
     data = {}
     try:
-        # ── Page data from SearchAPI — with retries, never fatal (same
-        #    hardening as Instagram: a failed profile call must not wipe
-        #    out the whole Facebook section when Apify posts still work) ──
-        p = {}
-        for attempt in range(3):
-            try:
-                r = requests.get(
-                    "https://www.searchapi.io/api/v1/search",
-                    params={"engine":"facebook_business_page","username":username,
-                            "api_key":SEARCHAPI_KEY},
-                    timeout=30
-                )
-                if r.status_code == 200:
-                    p = r.json().get("page", {}) or {}
-                    if p:
-                        break
-                print(f"   ⚠️ Facebook page attempt {attempt+1} failed (status {r.status_code})")
-            except Exception as e:
-                print(f"   ⚠️ Facebook page attempt {attempt+1} error: {e}")
-            time.sleep(3)
-        if not p:
-            print("   ⚠️ Facebook page unavailable after 3 attempts — "
-                  "continuing with post-level data only")
+        r = requests.get(
+            "https://www.searchapi.io/api/v1/search",
+            params={"engine":"facebook_business_page","username":username,
+                    "api_key":SEARCHAPI_KEY}
+        )
+        if r.status_code != 200:
+            return data
 
+        p = r.json().get("page", {})
         followers_raw = p.get("followers",{}).get("count","N/A")
         try:
             followers_n = int(str(followers_raw).replace(",",""))
@@ -2067,13 +2014,6 @@ LINKEDIN DATA:
 
 WRITING RULES (apply to EVERY *_analysis / *_summary field):
 - 2-3 sentences, strict maximum ~420 characters (fixed-size slide cards).
-- EXCEPTIONS with SMALLER boxes — hard character limits:
-  * youtube_content_analysis, youtube_comparison_analysis: max 2 sentences, ~250 characters
-  * linkedin_content_analysis, linkedin_comparison_analysis: max 2 sentences, ~200 characters
-  * every value inside cross_platform (strongest_platform, weakest_platform,
-    content_consistency, growth_opportunity): 1 short sentence, ~120 characters
-  * cross_platform.overall_recommendation: max ~300 characters
-  * every "strength" and "recommendation" field: 1 short sentence, ~120 characters
 - Use the REAL numbers from the data. Never invent numbers. Never write N/A if data exists.
 - If a platform's sample_size is 0 or missing, say so plainly instead of inventing analysis.
 - Benchmark bands for Engagement Rate per follower: under 1% = Low; 1-3.5% = Average/healthy;
@@ -2230,10 +2170,6 @@ def stat_block(slide, x, y, w, value, label, size=54, dark_bg=False):
     tb(slide, label.upper(), x, y+vh+0.05, w, 0.30, size=9.5, color=label_color, font=FONT_MONO)
 
 def card(slide, x, y, w, h, label, body, dark_bg=False, body_size=12.5):
-    """Card with AUTO-FIT body text: if the text is too long for the box,
-    the font steps down (to a 9.5pt floor) and, if still too long, the
-    text is cut at the last full sentence that fits. This guarantees text
-    can never overflow a card, no matter how long Claude's analysis runs."""
     fill_color = CARD_DARK if dark_bg else CARD_LIGHT
     body_color = TEXT_LIGHT if dark_bg else TEXT_DARK
     r = slide.shapes.add_shape(5, Inches(x), Inches(y), Inches(w), Inches(h))
@@ -2241,26 +2177,7 @@ def card(slide, x, y, w, h, label, body, dark_bg=False, body_size=12.5):
     try: r.adjustments[0] = 0.06
     except: pass
     tb(slide, label.upper(), x+0.28, y+0.18, w-0.56, 0.30, size=10.5, color=GOLD, font=FONT_MONO_MED)
-
-    body = str(body or "")
-    body_w = w - 0.56          # usable width in inches
-    body_h = h - 0.62          # usable height (label + padding removed)
-
-    def fits(text, size):
-        cpl = max(int(body_w * 72 / (size * 0.60)), 1)     # chars per line
-        import math as _m
-        lines = sum(_m.ceil(max(len(ln), 1) / cpl) for ln in text.split("\n"))
-        return lines * size * 1.30 / 72 <= body_h
-
-    size = body_size
-    while size > 9.5 and not fits(body, size):
-        size -= 0.5
-    if not fits(body, size):
-        cpl = max(int(body_w * 72 / (size * 0.60)), 1)
-        max_lines = max(int(body_h * 72 / (size * 1.30)), 1)
-        body = truncate_to_sentence(body, max_chars=cpl * max_lines)
-
-    tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=size, color=body_color,
+    tb(slide, body, x+0.28, y+0.50, w-0.56, h-0.6, size=body_size, color=body_color,
        font=FONT_MONO_LT, line_spacing=1.15)
 
 def shorten_url(url, maxlen=46):
