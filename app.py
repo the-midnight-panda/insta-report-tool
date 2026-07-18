@@ -974,17 +974,39 @@ def fetch_instagram(username):
     print(f"📸 Fetching Instagram: @{username}")
     data = {}
     try:
-        # ── Profile data from SearchAPI ───────────────────────────────
-        r = requests.get(
-            "https://www.searchapi.io/api/v1/search",
-            params={"engine":"instagram_profile","username":username,
-                    "api_key":SEARCHAPI_KEY}
-        )
-        if r.status_code != 200:
-            return data
-
-        ig = r.json()
-        p  = ig.get("profile", {})
+        # ── Profile data from SearchAPI — WITH RETRIES, NEVER FATAL ───
+        # Previously: a single failed profile call did `return data` and
+        # abandoned Instagram entirely, producing a report where every
+        # Instagram slide showed N/A even though the Apify post scrapers
+        # were healthy (confirmed live 2026-07-18: FB/YT/LI all worked in
+        # the same run). Now: retry up to 3 times with a short pause, and
+        # if the profile STILL can't be fetched, continue with post-level
+        # scraping anyway — followers show N/A but reels/images/carousels
+        # data, top/worst picks, and view-based rates still populate.
+        p = {}
+        ig = {}
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    "https://www.searchapi.io/api/v1/search",
+                    params={"engine":"instagram_profile","username":username,
+                            "api_key":SEARCHAPI_KEY},
+                    timeout=30
+                )
+                if r.status_code == 200:
+                    ig = r.json()
+                    p  = ig.get("profile", {}) or {}
+                    if p:
+                        break
+                print(f"   ⚠️ Instagram profile attempt {attempt+1} failed "
+                      f"(status {r.status_code}) — retrying..." if attempt < 2 else
+                      f"   ⚠️ Instagram profile attempt {attempt+1} failed (status {r.status_code})")
+            except Exception as e:
+                print(f"   ⚠️ Instagram profile attempt {attempt+1} error: {e}")
+            time.sleep(3)
+        if not p:
+            print("   ⚠️ Instagram profile unavailable after 3 attempts — "
+                  "continuing with post-level data only")
 
         followers   = p.get("followers", "N/A")
         following   = p.get("following", "N/A")
@@ -1187,15 +1209,30 @@ def fetch_facebook(username):
     print(f"👥 Fetching Facebook: {username}")
     data = {}
     try:
-        r = requests.get(
-            "https://www.searchapi.io/api/v1/search",
-            params={"engine":"facebook_business_page","username":username,
-                    "api_key":SEARCHAPI_KEY}
-        )
-        if r.status_code != 200:
-            return data
+        # ── Page data from SearchAPI — with retries, never fatal (same
+        #    hardening as Instagram: a failed profile call must not wipe
+        #    out the whole Facebook section when Apify posts still work) ──
+        p = {}
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    "https://www.searchapi.io/api/v1/search",
+                    params={"engine":"facebook_business_page","username":username,
+                            "api_key":SEARCHAPI_KEY},
+                    timeout=30
+                )
+                if r.status_code == 200:
+                    p = r.json().get("page", {}) or {}
+                    if p:
+                        break
+                print(f"   ⚠️ Facebook page attempt {attempt+1} failed (status {r.status_code})")
+            except Exception as e:
+                print(f"   ⚠️ Facebook page attempt {attempt+1} error: {e}")
+            time.sleep(3)
+        if not p:
+            print("   ⚠️ Facebook page unavailable after 3 attempts — "
+                  "continuing with post-level data only")
 
-        p = r.json().get("page", {})
         followers_raw = p.get("followers",{}).get("count","N/A")
         try:
             followers_n = int(str(followers_raw).replace(",",""))
