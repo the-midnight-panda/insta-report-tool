@@ -2594,19 +2594,26 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         card(s, 0.55, 5.35, 12.23, 1.60, f"{kicker} Analysis", analysis_text, dark_bg=dark, body_size=11)
         footer_bar(s, n, dark_bg=dark)
 
-    # ── SLIDE 3: Instagram Overview (dark) — Friday layout restored:
-    #    the "Estimated ER / Reach" metric was removed per client
-    #    decision 2026-07-20 (afternoon). Uses the shared overview_slide
-    #    like every other platform. ────────────────────────────────────
-    overview_slide(3, "Instagram", "Instagram Overview",
-        f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts",
-        [(usfmt(ig_raw.get("followers","N/A")), "Followers", 54),
-         (usfmt(ig_raw.get("posts","N/A")), "Total Posts (all time)", 54),
-         (ig_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
-        [(ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", 32),
-         (ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", 32),
-         (ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", 32)],
-        ig_raw, IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis"))
+    # ── SLIDE 3: Instagram Overview (dark) — "Total Posts (all time)"
+    #    removed per client request; custom 3+2 layout (5 stats) since
+    #    the shared overview_slide() is fixed at 3+3. Facebook/YouTube/
+    #    LinkedIn keep using overview_slide() unchanged. ───────────────
+    s, dark = start_slide(prs, blank, 3)
+    kicker_header(s, "Instagram", "Instagram Overview",
+                  f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, usfmt(ig_raw.get("followers","N/A")), "Followers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=54, dark_bg=dark)
+    stat_block(s, 0.55, 3.05, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.05, 3.86, ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", size=32, dark_bg=dark)
+    div = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+    ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.02), Inches(12.23), Pt(0.75))
+    ln.fill.solid(); ln.fill.fore_color.rgb = div; ln.line.fill.background()
+    hours_days_rows(s, ig_raw, 4.14, dark)
+    card(s, 0.55, 5.35, 12.23, 1.60, "Instagram Analysis",
+         IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis"),
+         dark_bg=dark, body_size=11)
+    footer_bar(s, 3, dark_bg=dark)
 
     # ── SLIDE 4: IG Content Strategy (light) ───────────────────
     s, dark = start_slide(prs, blank, 4)
@@ -2804,7 +2811,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     overview_slide(19, "YouTube", "YouTube Overview",
         f"{yt_raw.get('handle', handles.get('youtube','N/A'))}  ·  Based on last {yt_raw.get('sample_size','N/A')} videos",
         [(usfmt(yt_raw.get("subscribers","N/A")), "Subscribers", 54),
-         (yt_avg_rate_view, "Avg Rate / View", 54),
+         (yt_avg_rate_view, "Eng Rate / View", 54),
          (yt_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
         [(yt_raw.get("engagement_rate","N/A"), "Engagement Rate / Subscriber", 32),
          (yt_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Videos)", 32),
@@ -2855,74 +2862,102 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     deep_dive_slide(24, "YouTube — Videos", "Videos Deep Dive", yt_videos,
                     T("youtube_videos_analysis"), unit="video")
 
-    # ── SLIDE 24: YT Shorts vs Videos chart (light) ────────────
+    # ── SLIDE 25: YT Shorts vs Videos — VIEWS (light) — centered chart,
+    #    stat blocks removed (values now shown as data labels on the
+    #    bars), only the view-advantage ratio remains, below the chart. ──
     s, dark = start_slide(prs, blank, 25)
     kicker_header(s, "YouTube", "Shorts vs Videos", "Comparing the two formats head-to-head", dark_bg=dark)
     def _views_num(v):
         try: return int(str(v).replace(",",""))
         except: return 0
+    sv = _views_num(yt_shorts.get("avg_views",0)); vv = _views_num(yt_videos.get("avg_views",0))
     cd = ChartData(); cd.categories = ["Shorts", "Long-form Videos"]
-    cd.add_series("Avg Views", (_views_num(yt_shorts.get("avg_views",0)), _views_num(yt_videos.get("avg_views",0))))
-    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55), Inches(1.80),
-                                Inches(6.40), Inches(3.40), cd).chart
+    cd.add_series("Avg Views", (sv, vv))
+    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(2.67), Inches(1.80),
+                                Inches(8.00), Inches(3.40), cd).chart
     chart.has_legend = False
     ser = chart.plots[0].series[0]
     for i in range(2):
         ser.points[i].format.fill.solid(); ser.points[i].format.fill.fore_color.rgb = GOLD
-    chart.category_axis.tick_labels.font.size = Pt(11)
+    chart.category_axis.tick_labels.font.size = Pt(12)
     chart.value_axis.tick_labels.font.size = Pt(10)
-    # Value labels ON the bars, so the actual avg-view numbers are visible
     plot = chart.plots[0]
     plot.has_data_labels = True
     plot.data_labels.number_format = '#,##0'
     plot.data_labels.number_format_is_linked = False
-    plot.data_labels.font.size = Pt(13)
+    plot.data_labels.font.size = Pt(14)
     plot.data_labels.font.color.rgb = TEXT_DARK if not dark else TEXT_LIGHT
     tb(s, "AVG VIEWS PER UPLOAD", 0.55, 5.25, 6.00, 0.30, size=9.5,
        color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
-    stat_block(s, 7.45, 1.95, 5.00, yt_shorts.get("er_by_view","N/A"), "Shorts — ER by View", size=36, dark_bg=dark)
-    stat_block(s, 7.45, 3.15, 5.00, yt_videos.get("er_by_view","N/A"), "Videos — ER by View", size=36, dark_bg=dark)
-    sv = _views_num(yt_shorts.get("avg_views",0)); vv = _views_num(yt_videos.get("avg_views",0))
     ratio = f"{(vv/sv):.1f}x" if (sv and vv and vv >= sv) else (f"{(sv/vv):.1f}x" if (sv and vv) else "N/A")
     ratio_label = "Long-form View Advantage" if (sv and vv and vv >= sv) else "Shorts View Advantage"
-    stat_block(s, 7.45, 4.35, 5.00, ratio, ratio_label, size=36, dark_bg=dark)
-    card(s, 0.55, 5.70, 12.23, 1.20, "Analysis", T("youtube_comparison_analysis"), dark_bg=dark, body_size=11.5)
+    stat_block(s, 4.67, 5.55, 4.00, ratio, ratio_label, size=36, dark_bg=dark)
+    card(s, 0.55, 6.35, 12.23, 0.85, "Analysis", T("youtube_comparison_analysis"), dark_bg=dark, body_size=10.5)
     footer_bar(s, 25, dark_bg=dark)
 
-    # ── SLIDE 26: YT Shorts vs Videos — ENGAGEMENT chart (dark) — NEW:
-    #    exact same design as the views slide, but comparing Avg
-    #    Engagement per upload instead of Avg Views. ──────────────────
+    # ── SLIDE 26: YT Shorts vs Videos — ENGAGEMENT (dark) — two
+    #    side-by-side charts: Avg Engagement (left) and ER by View
+    #    (right, moved here from the old stat blocks on slide 25). Each
+    #    chart has its own advantage ratio below it. ──────────────────
     s, dark = start_slide(prs, blank, 26)
     kicker_header(s, "YouTube", "Shorts vs Videos — Engagement",
-                  "Comparing average engagement per upload head-to-head", dark_bg=dark)
+                  "Comparing average engagement and engagement rate by view, head-to-head", dark_bg=dark)
     def _eng_num(v):
         try: return float(str(v).replace(",",""))
         except: return 0
+    def _pct_num(v):
+        try: return float(str(v).replace("%",""))
+        except: return 0
     se = _eng_num(yt_shorts.get("avg_engagement",0)); ve = _eng_num(yt_videos.get("avg_engagement",0))
-    cd = ChartData(); cd.categories = ["Shorts", "Long-form Videos"]
-    cd.add_series("Avg Engagement", (se, ve))
-    chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55), Inches(1.80),
-                                Inches(6.40), Inches(3.40), cd).chart
-    chart.has_legend = False
-    ser = chart.plots[0].series[0]
+    se_er = _pct_num(yt_shorts.get("er_by_view",0)); ve_er = _pct_num(yt_videos.get("er_by_view",0))
+
+    # Graph 1 (left): Avg Engagement
+    cd1 = ChartData(); cd1.categories = ["Shorts", "Long-form"]
+    cd1.add_series("Avg Engagement", (se, ve))
+    chart1 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55), Inches(1.80),
+                                Inches(5.70), Inches(3.10), cd1).chart
+    chart1.has_legend = False
+    ser1 = chart1.plots[0].series[0]
     for i in range(2):
-        ser.points[i].format.fill.solid(); ser.points[i].format.fill.fore_color.rgb = GOLD
-    chart.category_axis.tick_labels.font.size = Pt(11)
-    chart.value_axis.tick_labels.font.size = Pt(10)
-    plot = chart.plots[0]
-    plot.has_data_labels = True
-    plot.data_labels.number_format = '#,##0.0'
-    plot.data_labels.number_format_is_linked = False
-    plot.data_labels.font.size = Pt(13)
-    plot.data_labels.font.color.rgb = TEXT_LIGHT if dark else TEXT_DARK
-    tb(s, "AVG ENGAGEMENT PER UPLOAD", 0.55, 5.25, 6.00, 0.30, size=9.5,
+        ser1.points[i].format.fill.solid(); ser1.points[i].format.fill.fore_color.rgb = GOLD
+    chart1.category_axis.tick_labels.font.size = Pt(11)
+    chart1.value_axis.tick_labels.font.size = Pt(9)
+    plot1 = chart1.plots[0]
+    plot1.has_data_labels = True
+    plot1.data_labels.number_format = '#,##0.0'
+    plot1.data_labels.number_format_is_linked = False
+    plot1.data_labels.font.size = Pt(12)
+    plot1.data_labels.font.color.rgb = TEXT_LIGHT if dark else TEXT_DARK
+    tb(s, "AVG ENGAGEMENT PER UPLOAD", 0.55, 5.00, 5.70, 0.28, size=9, align=PP_ALIGN.CENTER,
        color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
-    stat_block(s, 7.45, 1.95, 5.00, yt_shorts.get("avg_engagement","N/A"), "Shorts — Avg Engagement", size=36, dark_bg=dark)
-    stat_block(s, 7.45, 3.15, 5.00, yt_videos.get("avg_engagement","N/A"), "Videos — Avg Engagement", size=36, dark_bg=dark)
     eng_ratio = f"{(ve/se):.1f}x" if (se and ve and ve >= se) else (f"{(se/ve):.1f}x" if (se and ve) else "N/A")
     eng_ratio_label = "Long-form Engagement Advantage" if (se and ve and ve >= se) else "Shorts Engagement Advantage"
-    stat_block(s, 7.45, 4.35, 5.00, eng_ratio, eng_ratio_label, size=36, dark_bg=dark)
-    card(s, 0.55, 5.70, 12.23, 1.20, "Analysis", T("youtube_engagement_comparison_analysis"), dark_bg=dark, body_size=11.5)
+    stat_block(s, 0.55, 5.35, 5.70, eng_ratio, eng_ratio_label, size=30, dark_bg=dark)
+
+    # Graph 2 (right): Engagement Rate by View — moved here from slide 25
+    cd2 = ChartData(); cd2.categories = ["Shorts", "Long-form"]
+    cd2.add_series("ER by View", (se_er, ve_er))
+    chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(6.98), Inches(1.80),
+                                Inches(5.70), Inches(3.10), cd2).chart
+    chart2.has_legend = False
+    ser2 = chart2.plots[0].series[0]
+    for i in range(2):
+        ser2.points[i].format.fill.solid(); ser2.points[i].format.fill.fore_color.rgb = GOLD
+    chart2.category_axis.tick_labels.font.size = Pt(11)
+    chart2.value_axis.tick_labels.font.size = Pt(9)
+    plot2 = chart2.plots[0]
+    plot2.has_data_labels = True
+    plot2.data_labels.number_format = '0.00"%"'
+    plot2.data_labels.number_format_is_linked = False
+    plot2.data_labels.font.size = Pt(12)
+    plot2.data_labels.font.color.rgb = TEXT_LIGHT if dark else TEXT_DARK
+    tb(s, "ENGAGEMENT RATE BY VIEW", 6.98, 5.00, 5.70, 0.28, size=9, align=PP_ALIGN.CENTER,
+       color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
+    er_ratio = f"{(se_er/ve_er):.1f}x" if (se_er and ve_er and se_er >= ve_er) else (f"{(ve_er/se_er):.1f}x" if (se_er and ve_er) else "N/A")
+    er_ratio_label = "Shorts ER Advantage" if (se_er and ve_er and se_er >= ve_er) else "Long-form ER Advantage"
+    stat_block(s, 6.98, 5.35, 5.70, er_ratio, er_ratio_label, size=30, dark_bg=dark)
+
+    card(s, 0.55, 6.35, 12.23, 0.85, "Analysis", T("youtube_engagement_comparison_analysis"), dark_bg=dark, body_size=10.5)
     footer_bar(s, 26, dark_bg=dark)
 
     # ── SLIDE 27: LinkedIn Overview (dark) — no Employees ──────
