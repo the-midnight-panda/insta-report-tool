@@ -605,7 +605,23 @@ def _compute_group_metrics(posts_group, followers, is_reels=False):
 
     scored = sorted(posts_group, key=_score, reverse=True)
     top    = scored[0]
-    worst  = scored[-1]
+
+    # ── Worst pick fairness rule ─────────────────────────────────
+    # A post must be at least 3 days old to be eligible for "Worst".
+    # A post published today has had almost no time to collect likes/
+    # comments/shares, so its low score reflects its age, not its
+    # quality — crowning it "worst" would mislead the client. The Top
+    # pick is NOT filtered: if a brand-new post is already the top
+    # scorer, it earned that early. If every post in the group is
+    # newer than 3 days (very active accounts), fall back to judging
+    # all of them, since there's nothing older to compare against.
+    WORST_MIN_AGE_SECONDS = 3 * 86400
+    now_ts = time.time()
+    eligible_for_worst = [p for p in posts_group
+                          if p.get("ts") is None or (now_ts - p["ts"]) >= WORST_MIN_AGE_SECONDS]
+    if not eligible_for_worst:
+        eligible_for_worst = posts_group
+    worst = min(eligible_for_worst, key=_score)
 
     result = {
         "n":               n,
@@ -1107,6 +1123,7 @@ def fetch_instagram(username):
         # post-level data only — followers/bio just show N/A rather than
         # aborting the whole Instagram section. ─────────────────────────
         p = {}
+        ig = {}
         for attempt in range(3):
             try:
                 r = requests.get(
@@ -1116,7 +1133,8 @@ def fetch_instagram(username):
                     timeout=30
                 )
                 if r.status_code == 200:
-                    p = (r.json().get("profile", {}) or {})
+                    ig = r.json()
+                    p  = (ig.get("profile", {}) or {})
                     if p:
                         break
                 print(f"   ⚠️ SearchAPI Instagram profile attempt {attempt+1} failed (status {r.status_code})")
@@ -2568,16 +2586,59 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         card(s, 0.55, 5.35, 12.23, 1.60, f"{kicker} Analysis", analysis_text, dark_bg=dark, body_size=11)
         footer_bar(s, n, dark_bg=dark)
 
-    # ── SLIDE 3: Instagram Overview (dark) ─────────────────────
-    overview_slide(3, "Instagram", "Instagram Overview",
-        f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts",
-        [(usfmt(ig_raw.get("followers","N/A")), "Followers", 54),
-         (usfmt(ig_raw.get("posts","N/A")), "Total Posts (all time)", 54),
-         (ig_raw.get("posting_frequency","N/A"), "Posting Frequency", 44)],
-        [(ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", 32),
-         (ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", 32),
-         (ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", 32)],
-        ig_raw, IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis"))
+    # ── SLIDE 3: Instagram Overview (dark) — custom layout to fit the
+    #    new "Estimated Engagement Rate / Reach" metric right after
+    #    Followers, per confirmed spec. Facebook/YouTube/LinkedIn keep
+    #    using the shared overview_slide() unchanged. ──────────────────
+    def _pct_to_float(s):
+        try: return float(str(s).replace("%",""))
+        except: return None
+
+    # Estimated ER / Reach = weighted average of each format's real
+    # engagement-rate-by-view (reach), weighted by post count:
+    #   { [ER_reel×n_reel] + [ER_image×n_image] + [ER_carousel×n_carousel] }
+    #   ÷ (n_reel + n_image + n_carousel)
+    # HONEST LIMITATION: Images and Carousels have no view/reach data in
+    # this pipeline — Instagram doesn't expose view counts for static
+    # posts the way it does for video, so that number was never fetched
+    # for those two formats. Only formats with REAL reach data are
+    # included (currently Reels only); a format without data is
+    # excluded entirely rather than counted as 0, since 0 would falsely
+    # imply "no engagement" instead of "no data available". If image/
+    # carousel reach data is ever added to the pipeline, this formula
+    # picks it up automatically with no further code changes.
+    _reach_terms = []
+    _reel_er = _pct_to_float(ig_reels.get("er_by_view"))
+    if _reel_er is not None and ig_reels.get("n", 0) > 0:
+        _reach_terms.append((_reel_er, ig_reels.get("n", 0)))
+    # Images/Carousels: no reach data available — intentionally excluded.
+    if _reach_terms:
+        _total_n = sum(n for _, n in _reach_terms)
+        ig_estimated_er_reach = f"{(sum(er*n for er, n in _reach_terms) / _total_n):.2f}%" if _total_n else "N/A"
+    else:
+        ig_estimated_er_reach = "N/A"
+
+    s, dark = start_slide(prs, blank, 3)
+    kicker_header(s, "Instagram", "Instagram Overview",
+                  f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
+    # Row 1: Followers → Estimated ER / Reach (NEW, right after Followers) → Total Posts
+    stat_block(s, 0.55, 1.70, 3.86, usfmt(ig_raw.get("followers","N/A")), "Followers", size=48, dark_bg=dark)
+    stat_block(s, 4.73, 1.70, 3.86, ig_estimated_er_reach, "Estimated Engagement Rate / Reach", size=48, dark_bg=dark)
+    stat_block(s, 8.92, 1.70, 3.86, usfmt(ig_raw.get("posts","N/A")), "Total Posts (all time)", size=48, dark_bg=dark)
+    # Row 2: Posting Frequency, Engagement Rate / Follower, Engagement Rate / Views (Reels Only)
+    stat_block(s, 0.55, 2.90, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 2.90, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 2.90, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", size=32, dark_bg=dark)
+    # Row 3: Avg Engagement (the one stat that doesn't fit rows 1-2 anymore)
+    stat_block(s, 0.55, 4.00, 3.86, ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", size=26, dark_bg=dark)
+    div = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
+    ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.62), Inches(12.23), Pt(0.75))
+    ln.fill.solid(); ln.fill.fore_color.rgb = div; ln.line.fill.background()
+    hours_days_rows(s, ig_raw, 4.74, dark)
+    card(s, 0.55, 5.95, 12.23, 1.05, "Instagram Analysis",
+         IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis", max_chars=280),
+         dark_bg=dark, body_size=10.5)
+    footer_bar(s, 3, dark_bg=dark)
 
     # ── SLIDE 4: IG Content Strategy (light) ───────────────────
     s, dark = start_slide(prs, blank, 4)
@@ -2604,7 +2665,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
                       f"Based on {d.get('n',0)} {unit} from the last {sample}", dark_bg=dark)
         stat_block(s, 0.55, 1.75, 3.86, d.get("avg_engagement","N/A"), "Avg Engagement / Post", size=44, dark_bg=dark)
         stat_block(s, 4.73, 1.75, 3.86, d.get("er_per_follower","N/A"), "Engagement Rate / Followers", size=44, dark_bg=dark)
-        stat_block(s, 8.92, 1.75, 3.86, d.get("er_estimated","N/A"), "Estimated Engagement Rate / Followers", size=44, dark_bg=dark)
+        stat_block(s, 8.92, 1.75, 3.86, d.get("er_estimated","N/A"), "Estimated Engagement Rate / Impression", size=44, dark_bg=dark)
         stat_block(s, 0.55, 3.10, 3.86, d.get("avg_likes","N/A"), "Avg Likes / Post", size=32, dark_bg=dark)
         stat_block(s, 4.73, 3.10, 3.86, d.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
         stat_block(s, 8.92, 3.10, 3.86, d.get("n",0), "Posts in Sample", size=32, dark_bg=dark)
@@ -2629,7 +2690,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 4.20, 3.86, ig_reels.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 4.73, 4.20, 3.86, ig_reels.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 8.92, 4.20, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 5.30, 3.86, ig_reels.get("er_estimated","N/A"), "Estimated ER / Followers", size=28, dark_bg=dark)
+    stat_block(s, 0.55, 5.30, 3.86, ig_reels.get("er_estimated","N/A"), "Estimated ER / Impression", size=28, dark_bg=dark)
     stat_block(s, 4.73, 5.30, 3.86, ig_reels.get("n",0), "Reels in Sample", size=28, dark_bg=dark)
     footer_bar(s, 7, dark_bg=dark)
 
@@ -2731,7 +2792,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 8.92, 3.45, 3.86, fb_videos.get("er_per_follower","N/A"), "Engagement Rate / Followers", size=32, dark_bg=dark)
     stat_block(s, 0.55, 5.00, 3.86, fb_videos.get("like_rate","N/A"), "Like Rate (per view)", size=32, dark_bg=dark)
     stat_block(s, 4.73, 5.00, 3.86, fb_videos.get("comment_rate","N/A"), "Comment Rate (per view)", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 5.00, 3.86, fb_videos.get("er_estimated","N/A"), "Estimated ER / Followers", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 5.00, 3.86, fb_videos.get("er_estimated","N/A"), "Estimated ER / Impression", size=32, dark_bg=dark)
     footer_bar(s, 14, dark_bg=dark)
 
     # ── SLIDE 15: FB Videos Deep Dive (dark) ───────────────────
