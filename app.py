@@ -2622,22 +2622,21 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     kicker_header(s, "Instagram", "Instagram Overview",
                   f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
     # Row 1: Followers → Estimated ER / Reach (NEW, right after Followers) → Total Posts
-    stat_block(s, 0.55, 1.70, 3.86, usfmt(ig_raw.get("followers","N/A")), "Followers", size=48, dark_bg=dark)
-    stat_block(s, 4.73, 1.70, 3.86, ig_estimated_er_reach, "Estimated Engagement Rate / Reach", size=48, dark_bg=dark)
-    stat_block(s, 8.92, 1.70, 3.86, usfmt(ig_raw.get("posts","N/A")), "Total Posts (all time)", size=48, dark_bg=dark)
-    # Row 2: Posting Frequency, Engagement Rate / Follower, Engagement Rate / Views (Reels Only)
-    stat_block(s, 0.55, 2.90, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=32, dark_bg=dark)
-    stat_block(s, 4.73, 2.90, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
-    stat_block(s, 8.92, 2.90, 3.86, ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", size=32, dark_bg=dark)
-    # Row 3: Avg Engagement (the one stat that doesn't fit rows 1-2 anymore)
-    stat_block(s, 0.55, 4.00, 3.86, ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", size=26, dark_bg=dark)
+    stat_block(s, 0.55, 1.75, 3.86, usfmt(ig_raw.get("followers","N/A")), "Followers", size=54, dark_bg=dark)
+    stat_block(s, 4.73, 1.75, 3.86, ig_estimated_er_reach, "Estimated Engagement Rate / Reach", size=54, dark_bg=dark)
+    stat_block(s, 8.92, 1.75, 3.86, usfmt(ig_raw.get("posts","N/A")), "Total Posts (all time)", size=54, dark_bg=dark)
+    # Row 2: Posting Frequency, Engagement Rate / Follower, Avg Engagement (Total ÷ Posts)
+    #        — "Engagement Rate / Views (Reels Only)" removed, replaced by Avg Engagement here.
+    stat_block(s, 0.55, 3.05, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=32, dark_bg=dark)
+    stat_block(s, 4.73, 3.05, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=32, dark_bg=dark)
+    stat_block(s, 8.92, 3.05, 3.86, ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", size=32, dark_bg=dark)
     div = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
-    ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.62), Inches(12.23), Pt(0.75))
+    ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.02), Inches(12.23), Pt(0.75))
     ln.fill.solid(); ln.fill.fore_color.rgb = div; ln.line.fill.background()
-    hours_days_rows(s, ig_raw, 4.74, dark)
-    card(s, 0.55, 5.95, 12.23, 1.05, "Instagram Analysis",
-         IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis", max_chars=280),
-         dark_bg=dark, body_size=10.5)
+    hours_days_rows(s, ig_raw, 4.14, dark)
+    card(s, 0.55, 5.35, 12.23, 1.60, "Instagram Analysis",
+         IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis"),
+         dark_bg=dark, body_size=11)
     footer_bar(s, 3, dark_bg=dark)
 
     # ── SLIDE 4: IG Content Strategy (light) ───────────────────
