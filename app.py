@@ -782,7 +782,65 @@ def fetch_post_metrics_via_analytics_actor(post_urls):
     return results
 
 
-def fetch_instagram_posts_via_apify(username):
+def fetch_instagram_profile_via_apify(username):
+    """
+    Backup profile fetch — used only when SearchAPI's profile call (3
+    retries) still couldn't get followers/bio. Uses the SAME actor as
+    the post-fallback (apify/instagram-scraper), just in its "details"
+    mode, which returns profile-level fields (followersCount,
+    followsCount, biography, fullName, isVerified/verified,
+    profilePicUrlHD, postsCount) instead of a list of posts. Since it's
+    the same actor already used as the post fallback, no new actor
+    dependency is introduced.
+    """
+    if not APIFY_API_KEY:
+        return {}
+    try:
+        print(f"   🔄 SearchAPI profile unavailable — trying Apify profile fallback for @{username}...")
+        actor_input = {
+            "directUrls":   [f"https://www.instagram.com/{username}/"],
+            "resultsType":  "details",
+            "resultsLimit": 1,
+            "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
+        }
+        r = requests.post(
+            "https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items",
+            params={"token": APIFY_API_KEY, "timeout": 90},
+            json=actor_input,
+            timeout=120
+        )
+        items = []
+        if r.status_code in (200, 201):
+            items = r.json()
+            if not isinstance(items, list):
+                items = []
+        if not items:
+            items = fetch_apify_async(username, "apify~instagram-scraper", actor_input)
+
+        prof = next((it for it in items if isinstance(it, dict) and not it.get("error")), None)
+        if not prof:
+            print("   ⚠️ Apify profile fallback returned nothing usable")
+            return {}
+
+        result = {
+            "followers":   _get_first(prof, ["followersCount", "followers"]),
+            "following":   _get_first(prof, ["followsCount", "followingCount", "following"]),
+            "posts":       _get_first(prof, ["postsCount", "posts"]),
+            "biography":   prof.get("biography", ""),
+            "full_name":   prof.get("fullName", ""),
+            "is_verified": bool(prof.get("verified") or prof.get("isVerified")),
+            "is_business": bool(prof.get("isBusinessAccount")),
+            "avatar_hd":   _get_first(prof, ["profilePicUrlHD", "profilePicUrl"]),
+        }
+        found = sum(1 for v in result.values() if v not in (None, "", False))
+        print(f"   ✅ Apify profile fallback found {found} fields (followers: {result.get('followers','N/A')})")
+        return {k: v for k, v in result.items() if v not in (None, "")}
+    except Exception as e:
+        print(f"   ⚠️ Apify profile fallback error: {e}")
+        return {}
+
+
+def fetch_instagram_posts_via_apify(username, known_total_posts=None):
     """
     Two-scraper approach:
     1. apify/instagram-post-scraper  → images + carousels (likes, comments, views)
@@ -811,6 +869,15 @@ def fetch_instagram_posts_via_apify(username):
             "username":      [username],
             "resultsLimit":  35,
             "addParentData": False,
+            # RESIDENTIAL proxies look like real home internet connections
+            # instead of obviously-automated datacenter IPs — Instagram's
+            # anti-bot system blocks datacenter IPs far more aggressively.
+            # Confirmed live 2026-07-18: default (datacenter) proxy got
+            # blocked 11x in a row with "Request blocked, retrying it
+            # again with different session". Residential costs slightly
+            # more in Apify usage but is the main lever to reduce how
+            # often this happens.
+            "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
         }
         r = requests.post(
             "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items",
@@ -840,6 +907,7 @@ def fetch_instagram_posts_via_apify(username):
         reel_input = {
             "username":     [username],
             "resultsLimit": 35,
+            "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
         }
         r2 = requests.post(
             "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/run-sync-get-dataset-items",
@@ -877,6 +945,79 @@ def fetch_instagram_posts_via_apify(username):
         print(f"   ⚠️ Reel scraper error: {e}")
 
     print(f"   ✅ Total combined posts fetched (pre date-sort): {len(all_posts)}")
+
+    # ── 3. FALLBACK ACTOR — used only when the two primary scrapers come
+    #    back blocked or near-empty (confirmed live 2026-07-18: both
+    #    primary actors returned 1 error item with "Request blocked,
+    #    retrying it again with different session" ×11 → Instagram was
+    #    blocking that actor's sessions). apify/instagram-scraper is the
+    #    big general-purpose actor running on different infrastructure,
+    #    so it often works when the specialized ones are blocked. Its
+    #    output fields (likesCount, commentsCount, timestamp, url, type
+    #    "Image"/"Video"/"Sidecar", videoViewCount) are already handled
+    #    by the existing parser, so no field mapping changes needed. ────
+    if len(all_posts) < 5:
+        # ── Don't waste a fallback call on a genuinely small account ──
+        # A brand with only 2-3 posts total isn't "blocked" — it's just
+        # new/small, and that's accurately reflected in what came back.
+        # Only treat <5 as a possible BLOCKING signal when the account's
+        # own profile bio (fetched earlier) says it actually has 5+
+        # posts — i.e. we know more posts should exist but didn't come
+        # back. If we don't know the account's total (profile call also
+        # failed), we still try the fallback, since there's no way to
+        # rule out blocking in that case.
+        def _to_int(v):
+            try: return int(str(v).replace(",",""))
+            except: return None
+        total_n = _to_int(known_total_posts)
+        account_is_genuinely_small = (total_n is not None and total_n < 5)
+
+        if account_is_genuinely_small:
+            print(f"   ℹ️ Account has only {known_total_posts} posts total (per profile) — "
+                  f"{len(all_posts)} is genuinely all there is, skipping fallback scraper")
+        else:
+            try:
+                print(f"   🔄 Primary scrapers returned only {len(all_posts)} posts — trying fallback actor apify/instagram-scraper...")
+                fb_input = {
+                    "directUrls":   [f"https://www.instagram.com/{username}/"],
+                    "resultsType":  "posts",
+                    "resultsLimit": 35,
+                    "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
+                }
+                r3 = requests.post(
+                    "https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items",
+                    params={"token": APIFY_API_KEY, "timeout": 150},
+                    json=fb_input,
+                    timeout=180
+                )
+                fallback_posts = []
+                if r3.status_code in (200, 201):
+                    fallback_posts = r3.json()
+                    if not isinstance(fallback_posts, list):
+                        fallback_posts = []
+                if not fallback_posts:
+                    print(f"   ⚠️ Fallback scraper sync empty/failed (status {r3.status_code}), trying async...")
+                    fallback_posts = fetch_apify_async(username, "apify~instagram-scraper", fb_input)
+                # Drop error items (blocked runs return an item with an "error" key)
+                fallback_posts = [p for p in fallback_posts
+                                  if isinstance(p, dict) and not p.get("error")
+                                  and _get_first(p, ["likesCount","commentsCount","timestamp","url"]) is not None]
+                if fallback_posts:
+                    existing_urls = {p.get("url","") for p in all_posts}
+                    new_posts = [p for p in fallback_posts if p.get("url","") not in existing_urls]
+                    all_posts.extend(new_posts)
+                    print(f"   ✅ Fallback actor added {len(new_posts)} posts (total now {len(all_posts)})")
+                else:
+                    print("   ⚠️ Fallback actor also returned nothing usable")
+            except Exception as e:
+                print(f"   ⚠️ Fallback Instagram scraper error: {e}")
+
+    # Filter out error items from the primary scrapers too — a blocked run
+    # "succeeds" with 1 item that is actually an error record, which
+    # previously counted as a real post ("Based on last 1 posts").
+    all_posts = [p for p in all_posts
+                 if isinstance(p, dict) and not p.get("error")]
+
     return all_posts
 
 
@@ -958,17 +1099,37 @@ def fetch_instagram(username):
     print(f"📸 Fetching Instagram: @{username}")
     data = {}
     try:
-        # ── Profile data from SearchAPI ───────────────────────────────
-        r = requests.get(
-            "https://www.searchapi.io/api/v1/search",
-            params={"engine":"instagram_profile","username":username,
-                    "api_key":SEARCHAPI_KEY}
-        )
-        if r.status_code != 200:
-            return data
+        # ── Profile data — SearchAPI PRIMARY, Apify BACKUP. ─────────────
+        # Step 2 (confirmed 2026-07-20): ask SearchAPI first, retry up to
+        # 3 times. If SearchAPI is still down after 3 tries, fall back to
+        # the Apify profile scraper (apify/instagram-scraper, profile
+        # mode) instead of giving up. If BOTH fail, continue anyway with
+        # post-level data only — followers/bio just show N/A rather than
+        # aborting the whole Instagram section. ─────────────────────────
+        p = {}
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    "https://www.searchapi.io/api/v1/search",
+                    params={"engine":"instagram_profile","username":username,
+                            "api_key":SEARCHAPI_KEY},
+                    timeout=30
+                )
+                if r.status_code == 200:
+                    p = (r.json().get("profile", {}) or {})
+                    if p:
+                        break
+                print(f"   ⚠️ SearchAPI Instagram profile attempt {attempt+1} failed (status {r.status_code})")
+            except Exception as e:
+                print(f"   ⚠️ SearchAPI Instagram profile attempt {attempt+1} error: {e}")
+            if attempt < 2:
+                time.sleep(3)
 
-        ig = r.json()
-        p  = ig.get("profile", {})
+        if not p:
+            print("   ⚠️ SearchAPI unavailable after 3 attempts — trying Apify profile backup")
+            p = fetch_instagram_profile_via_apify(username)
+            if not p:
+                print("   ⚠️ Apify profile backup also unavailable — continuing with post-level data only")
 
         followers   = p.get("followers", "N/A")
         following   = p.get("following", "N/A")
@@ -985,7 +1146,7 @@ def fetch_instagram(username):
             followers_n = 0
 
         # ── Posts via Apify (post + reel scrapers), fallback to SearchAPI ──
-        apify_posts = fetch_instagram_posts_via_apify(username)
+        apify_posts = fetch_instagram_posts_via_apify(username, known_total_posts=total_posts)
         if apify_posts:
             posts_raw = apify_posts
             source    = "apify"
@@ -2314,6 +2475,19 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     ig_images    = ig_raw.get("images", {})
     ig_carousels = ig_raw.get("carousels", {})
     ig_reels     = ig_raw.get("reels", {})
+    # ── Graceful degradation flag ────────────────────────────────────
+    # If Instagram's scrapers were blocked for this entire run (sample
+    # size 0/missing AND no followers), show a clear professional notice
+    # instead of a wall of confusing "N/A" values across 8 slides. This
+    # doesn't fix the underlying block — nothing on our side can force
+    # Instagram to allow the scraper through — but it means a blocked
+    # run produces a report that reads as "temporarily unavailable, try
+    # again shortly" rather than looking like the tool is broken.
+    ig_unavailable = (not ig_raw.get("sample_size")) and (ig_raw.get("followers") in (None, "N/A", ""))
+    IG_UNAVAILABLE_MSG = ("Instagram data could not be retrieved for this report — Instagram's anti-scraping "
+                          "protection was temporarily blocking access at generation time. This is a short-lived, "
+                          "recurring restriction on Instagram's side (not specific to this brand) that typically "
+                          "clears within a few hours. Regenerate the report to try again.")
     yt_shorts    = yt_raw.get("shorts", {})
     yt_videos    = yt_raw.get("videos_performance", {})
     fb_photos    = fb_raw.get("photos", {})
@@ -2403,7 +2577,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         [(ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", 32),
          (ig_raw.get("engagement_rate_reels","N/A"), "Engagement Rate / Views (Reels Only)", 32),
          (ig_raw.get("avg_engagement","N/A"), "Avg Engagement (Total ÷ Posts)", 32)],
-        ig_raw, T("instagram_analysis"))
+        ig_raw, IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis"))
 
     # ── SLIDE 4: IG Content Strategy (light) ───────────────────
     s, dark = start_slide(prs, blank, 4)
@@ -2420,7 +2594,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
     for lbl, cnt, y in [("Videos / Reels",vid_c,1.95),("Carousels",car_c,3.05),("Images",img_c,4.15)]:
         stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/total*100))}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
-    card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", T("instagram_content_analysis"), dark_bg=dark, body_size=11.5)
+    card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_content_analysis"), dark_bg=dark, body_size=11.5)
     footer_bar(s, 4, dark_bg=dark)
 
     # ── Format performance slide (IG images/carousels, FB photos) ──
