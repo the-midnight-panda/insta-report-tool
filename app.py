@@ -2824,10 +2824,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
             rank = i + 1
             r = s.shapes.add_shape(5, Inches(0.55), Inches(y), Inches(12.23), Inches(row_h - 0.10))
             r.fill.solid(); r.fill.fore_color.rgb = fill_color
-            if rank == 1:
-                r.line.color.rgb = GOLD; r.line.width = Pt(1.5)
-            else:
-                r.line.fill.background()
+            r.line.fill.background()
             try: r.adjustments[0] = 0.10
             except: pass
             # Rank badge
@@ -2839,9 +2836,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
             tb(s, post["caption"], 1.35, y + 0.08, 7.80, 0.40, size=13, bold=True, color=body_color, font=FONT_MONO)
             tb(s, f"{post['type_label']}  ·  {post['date']}", 1.35, y + 0.48, 7.80, 0.28,
                size=10.5, color=sub_gray, font=FONT_MONO_LT)
-            # Likes / Comments, right-aligned
-            stat_block(s, 9.35, y + 0.06, 1.60, post["likes"], "Likes", size=22, dark_bg=dark)
-            stat_block(s, 11.05, y + 0.06, 1.60, post["comments"], "Comments", size=22, dark_bg=dark)
+            # Likes / Comments — sized to fit INSIDE the row rectangle
+            # (row inner height is 0.82"; value 0.42" + label 0.24" = fits)
+            tb(s, post["likes"], 9.35, y + 0.09, 1.60, 0.42, size=20, color=GOLD, font=FONT_STAT)
+            tb(s, "LIKES", 9.35, y + 0.52, 1.60, 0.24, size=8.5, color=sub_gray, font=FONT_MONO)
+            tb(s, post["comments"], 11.05, y + 0.09, 1.60, 0.42, size=20, color=GOLD, font=FONT_STAT)
+            tb(s, "COMMENTS", 11.05, y + 0.52, 1.60, 0.24, size=8.5, color=sub_gray, font=FONT_MONO)
             y += row_h
         footer_bar(s, n, dark_bg=dark)
 
