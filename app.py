@@ -75,25 +75,30 @@ def extract_social_from_html(html):
     SKIP = {"p","explore","accounts","stories","reel","tv","share","sharer",
             "login","signup","intent","home","search"}
     for tag in soup.find_all("a", href=True):
-        href = tag["href"].lower()
+        href   = tag["href"]          # original case — channel IDs are case-sensitive!
+        href_l = href.lower()         # lowercased copy ONLY for 'contains' checks
+        # BUG FIX 2026-07-23: previously the whole URL was lowercased before
+        # extraction, which corrupted YouTube channel IDs (UCse72IAHOl… →
+        # ucse72iahol…) making the YouTube API return nothing. Confirmed
+        # live on cult.fit and Bunaai reports (40 N/As each).
 
-        if "instagram.com" in href and "instagram" not in handles:
+        if "instagram.com" in href_l and "instagram" not in handles:
             m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)/?', href, re.I)
             if m and m.group(1).lower() not in SKIP:
                 handles["instagram"] = m.group(1)
 
-        if "facebook.com" in href and "facebook" not in handles:
-            if "profile.php" not in href:
+        if "facebook.com" in href_l and "facebook" not in handles:
+            if "profile.php" not in href_l:
                 m = re.search(r'facebook\.com/([A-Za-z0-9_.]+)/?', href, re.I)
                 if m and m.group(1).lower() not in SKIP:
                     handles["facebook"] = m.group(1)
 
-        if "linkedin.com/company" in href and "linkedin" not in handles:
+        if "linkedin.com/company" in href_l and "linkedin" not in handles:
             m = re.search(r'linkedin\.com/company/([A-Za-z0-9_.-]+)/?', href, re.I)
             if m:
                 handles["linkedin"] = m.group(1)
 
-        if "youtube.com" in href and "youtube" not in handles:
+        if "youtube.com" in href_l and "youtube" not in handles:
             m = re.search(r'youtube\.com/@([A-Za-z0-9_.]+)/?', href, re.I)
             if m:
                 handles["youtube"] = "@" + m.group(1)
@@ -2705,12 +2710,16 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         s, dark = start_slide(prs, blank, n)
         kicker_header(s, kicker, title, sub, dark_bg=dark)
         for i, (val, lbl, sz) in enumerate(stats_row1):
-            stat_block(s, 0.55 + i*4.18, 2.30, 3.86, val, lbl, size=sz+4, dark_bg=dark)
+            # Only enlarge short numeric values; text-style values like
+            # "2.3 / week" wrap at bigger sizes (seen live on slide 3).
+            bump = 4 if len(str(val)) <= 8 else 0
+            stat_block(s, 0.55 + i*4.18, 2.30, 3.86, val, lbl, size=sz+bump, dark_bg=dark)
         div = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
         ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.05), Inches(12.23), Pt(0.75))
         ln.fill.solid(); ln.fill.fore_color.rgb = div; ln.line.fill.background()
         for i, (val, lbl, sz) in enumerate(stats_row2):
-            stat_block(s, 0.55 + i*4.18, 4.55, 3.86, val, lbl, size=sz+4, dark_bg=dark)
+            bump = 4 if len(str(val)) <= 8 else 0
+            stat_block(s, 0.55 + i*4.18, 4.55, 3.86, val, lbl, size=sz+bump, dark_bg=dark)
         footer_bar(s, n, dark_bg=dark)
 
     def posting_patterns_slide(n, kicker, d, analysis_text):
@@ -2754,7 +2763,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     kicker_header(s, "Instagram", "Instagram Overview",
                   f"@{handles.get('instagram','N/A')}  ·  Based on last {ig_raw.get('sample_size','N/A')} posts", dark_bg=dark)
     stat_block(s, 0.55, 2.30, 3.86, usfmt(ig_raw.get("followers","N/A")), "Followers", size=58, dark_bg=dark)
-    stat_block(s, 4.73, 2.30, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=58, dark_bg=dark)
+    stat_block(s, 4.73, 2.30, 3.86, ig_raw.get("posting_frequency","N/A"), "Posting Frequency", size=44, dark_bg=dark)
     stat_block(s, 8.92, 2.30, 3.86, ig_raw.get("engagement_rate","N/A"), "Engagement Rate / Follower", size=58, dark_bg=dark)
     div = RGBColor(0x2A,0x2A,0x2A) if dark else RGBColor(0xD8,0xD5,0xCC)
     ln = s.shapes.add_shape(1, Inches(0.55), Inches(4.05), Inches(12.23), Pt(0.75))
@@ -2767,6 +2776,11 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     posting_patterns_slide(4, "Instagram", ig_raw,
         IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_analysis"))
 
+    def legend_dot(s, x, y, color, dark):
+        d = s.shapes.add_shape(9, Inches(x), Inches(y), Inches(0.18), Inches(0.18))  # 9 = oval
+        d.fill.solid(); d.fill.fore_color.rgb = color
+        d.line.color.rgb = RGBColor(0x8A,0x84,0x78); d.line.width = Pt(0.75)
+
     # ── SLIDE 4: IG Content Strategy (light) ───────────────────
     s, dark = start_slide(prs, blank, 5)
     kicker_header(s, "Instagram", "Content Strategy",
@@ -2776,11 +2790,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd = ChartData(); cd.categories = ["Images","Carousels","Videos / Reels"]
     cd.add_series("Posts",(img_c,car_c,vid_c))
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
-    chart.has_legend = True
+    chart.has_legend = False  # native legend was unreadable — custom dots below
     for i, col in enumerate([PIE_TAN, CARD_DARK, GOLD]):
         pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    for lbl, cnt, y in [("Videos / Reels",vid_c,1.95),("Carousels",car_c,3.05),("Images",img_c,4.15)]:
+    for lbl, cnt, y, col in [("Videos / Reels",vid_c,1.95,GOLD),("Carousels",car_c,3.05,CARD_DARK),("Images",img_c,4.15,PIE_TAN)]:
+        legend_dot(s, 6.30, y + 0.28, col, dark)
         stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/total*100))}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
     card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_content_analysis"), dark_bg=dark, body_size=11.5)
     footer_bar(s, 5, dark_bg=dark)
@@ -3003,11 +3018,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd = ChartData(); cd.categories = ["Photos","Videos","Links"]
     cd.add_series("Posts",(fb_photo_c,fb_video_c,fb_link_c))
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
-    chart.has_legend = True
+    chart.has_legend = False  # native legend was unreadable — custom dots below
     for i, col in enumerate([GOLD, CARD_DARK, PIE_TAN]):
         pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    for lbl, cnt, y in [("Photos",fb_photo_c,1.95),("Videos",fb_video_c,3.05),("Links",fb_link_c,4.15)]:
+    for lbl, cnt, y, col in [("Photos",fb_photo_c,1.95,GOLD),("Videos",fb_video_c,3.05,CARD_DARK),("Links",fb_link_c,4.15,PIE_TAN)]:
+        legend_dot(s, 6.30, y + 0.28, col, dark)
         stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/fb_total*100))}%", f"{lbl} — {cnt} posts", size=32, dark_bg=dark)
     card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", T("facebook_content_analysis"), dark_bg=dark, body_size=11.5)
     footer_bar(s, 15, dark_bg=dark)
@@ -3096,11 +3112,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd = ChartData(); cd.categories = ["Shorts","Videos"]
     cd.add_series("Videos",(yt_shorts_c, yt_videos_c))
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
-    chart.has_legend = True
+    chart.has_legend = False  # native legend was unreadable — custom dots below
     for i, col in enumerate([GOLD, RGBColor(0x3A,0x3A,0x3A)]):
         pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
-    for lbl, cnt, y in [("Shorts",yt_shorts_c,2.30),("Videos",yt_videos_c,3.70)]:
+    for lbl, cnt, y, col in [("Shorts",yt_shorts_c,2.30,GOLD),("Videos",yt_videos_c,3.70,RGBColor(0x3A,0x3A,0x3A))]:
+        legend_dot(s, 6.30, y + 0.34, col, dark)
         stat_block(s, 6.55, y, 5.60, f"{int(round(cnt/yt_total*100))}%",
                    f"{lbl} — {cnt} video{'s' if cnt != 1 else ''}", size=40, dark_bg=dark)
     card(s, 0.55, 5.60, 12.23, 1.30, "Content Strategy Analysis", T("youtube_content_analysis"), dark_bg=dark, body_size=11.5)
@@ -3267,15 +3284,16 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd = ChartData(); cd.categories = [label for _, label in li_cat_order]
     cd.add_series("Posts", tuple(li_counts))
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.55),Inches(1.80),Inches(5.40),Inches(3.90),cd).chart
-    chart.has_legend = True; chart.legend.font.size = Pt(9)
+    chart.has_legend = False  # native legend was unreadable — custom dots in the list
     LI_COLORS = [GOLD, RGBColor(0x8B,0x6F,0x47), CARD_DARK, PIE_TAN,
                  RGBColor(0x6B,0x59,0x40), RGBColor(0xA8,0xA2,0x96), RGBColor(0x4A,0x38,0x26)]
     for i, col in enumerate(LI_COLORS):
         pt = chart.plots[0].series[0].points[i]
         pt.format.fill.solid(); pt.format.fill.fore_color.rgb = col
     yy = 1.90
-    for key, label in li_cat_order:
+    for li_i, (key, label) in enumerate(li_cat_order):
         cnt = li_categories.get(key, {}).get("n", 0)
+        legend_dot(s, 6.18, yy + 0.05, LI_COLORS[li_i], dark)
         tb(s, label, 6.45, yy, 3.65, 0.30, size=12, bold=True,
            color=(TEXT_LIGHT if dark else TEXT_DARK), font=FONT_MONO_MED)
         tb(s, f"{int(round(cnt/li_total*100))}%  —  {cnt} post{'s' if cnt != 1 else ''}",
