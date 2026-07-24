@@ -2499,7 +2499,8 @@ def apply_shadow(shape, dark_bg):
         for el in sp.findall(_qn('a:effectLst')):
             sp.remove(el)
         color = "FFFFFF" if dark_bg else "000000"
-        alpha = "28000" if dark_bg else "30000"   # ~28% / 30% opacity
+        # Dark-slide glow halved per client feedback 2026-07-24 (was 28%)
+        alpha = "14000" if dark_bg else "30000"
         xml = (f'<a:effectLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
                f'<a:outerShdw blurRad="90000" dist="38100" dir="5400000" rotWithShape="0">'
                f'<a:srgbClr val="{color}"><a:alpha val="{alpha}"/></a:srgbClr>'
@@ -2825,7 +2826,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     posting_patterns_slide(4, "Instagram", ig_raw,
         IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_patterns_analysis"))
 
-    def style_bar_chart(chart, dark, label_fmt='#,##0', inside=True):
+    def style_bar_chart(chart, dark, label_fmt='#,##0', inside=True, max_val=None):
         """Premium bar styling: no gridlines/borders, explicit axis label
         fonts (LibreOffice/Keynote drop unstyled defaults — the missing
         'Shorts/Long-form' text bug), data labels inside bar ends so tall
@@ -2855,11 +2856,15 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         dl.number_format = label_fmt; dl.number_format_is_linked = False
         dl.font.size = Pt(13); dl.font.bold = True
         dl.font.color.rgb = GOLD if dark else TEXT_DARK
-        if inside:
-            try:
-                from pptx.enum.chart import XL_LABEL_POSITION
-                dl.position = XL_LABEL_POSITION.INSIDE_END
-                dl.font.color.rgb = BG_DARK
+        # Labels ABOVE each bar (client 2026-07-24): white on dark slides,
+        # black on light — and 25% axis headroom so top labels never clip.
+        try:
+            from pptx.enum.chart import XL_LABEL_POSITION
+            dl.position = XL_LABEL_POSITION.OUTSIDE_END
+        except Exception: pass
+        dl.font.color.rgb = TEXT_LIGHT if dark else TEXT_DARK
+        if max_val:
+            try: chart.value_axis.maximum_scale = float(max_val) * 1.25
             except Exception: pass
 
     def legend_dot(s, x, y, color, dark):
@@ -2875,6 +2880,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     total = max(img_c + car_c + vid_c, 1)
     cd = ChartData(); cd.categories = ["Images","Carousels","Videos / Reels"]
     cd.add_series("Posts",(img_c,car_c,vid_c))
+    _pp = s.shapes.add_shape(5, Inches(0.7), Inches(1.7), Inches(5.2), Inches(3.85))
+    _pp.fill.solid(); _pp.fill.fore_color.rgb = CARD_DARK if dark else CARD_LIGHT
+    _pp.line.fill.background()
+    try: _pp.adjustments[0] = 0.05
+    except: pass
+    apply_shadow(_pp, dark)
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
     chart.has_legend = False  # native legend was unreadable — custom dots below
     for i, col in enumerate([PIE_TAN, CARD_DARK, GOLD]):
@@ -2895,7 +2906,6 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
         stat_block(s, 4.73, 1.75, 3.86, d.get("er_per_follower","N/A"), "Engagement Rate / Followers", size=44, dark_bg=dark)
         stat_block(s, 8.92, 1.75, 3.86, d.get("avg_likes","N/A"), "Avg Likes / Post", size=44, dark_bg=dark)
         stat_block(s, 0.55, 3.10, 3.86, d.get("avg_comments","N/A"), "Avg Comments / Post", size=32, dark_bg=dark)
-        stat_block(s, 4.73, 3.10, 3.86, d.get("n",0), "Posts in Sample", size=32, dark_bg=dark)
         # Top/Worst links (client request 2026-07-24) — matches the
         # LinkedIn per-category slides; only shown when posts exist.
         if d.get("n", 0) and d.get("top_url"):
@@ -2926,8 +2936,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     stat_block(s, 0.55, 4.20, 3.86, ig_reels.get("like_rate","N/A"), "Like Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 4.73, 4.20, 3.86, ig_reels.get("comment_rate","N/A"), "Comment Rate (per view)", size=28, dark_bg=dark)
     stat_block(s, 8.92, 4.20, 3.86, ig_reels.get("share_rate","N/A"), "Share Rate (per view)", size=28, dark_bg=dark)
-    stat_block(s, 0.55, 5.30, 3.86, ig_reels.get("n",0), "Reels in Sample", size=28, dark_bg=dark)
-    card(s, 0.55, 6.35, 12.23, 0.85, "Analysis",
+    card(s, 0.55, 5.50, 12.23, 1.55, "Analysis",
          IG_UNAVAILABLE_MSG if ig_unavailable else T("instagram_reels_performance_analysis"),
          dark_bg=dark, body_size=10.5)
     footer_bar(s, 8, dark_bg=dark)
@@ -3118,6 +3127,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     fb_total = max(fb_photo_c + fb_video_c + fb_link_c, 1)
     cd = ChartData(); cd.categories = ["Photos","Videos","Links"]
     cd.add_series("Posts",(fb_photo_c,fb_video_c,fb_link_c))
+    _pp = s.shapes.add_shape(5, Inches(0.7), Inches(1.7), Inches(5.2), Inches(3.85))
+    _pp.fill.solid(); _pp.fill.fore_color.rgb = CARD_DARK if dark else CARD_LIGHT
+    _pp.line.fill.background()
+    try: _pp.adjustments[0] = 0.05
+    except: pass
+    apply_shadow(_pp, dark)
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
     chart.has_legend = False  # native legend was unreadable — custom dots below
     for i, col in enumerate([GOLD, CARD_DARK, PIE_TAN]):
@@ -3214,6 +3229,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     yt_total = max(yt_shorts_c + yt_videos_c, 1)
     cd = ChartData(); cd.categories = ["Shorts","Videos"]
     cd.add_series("Videos",(yt_shorts_c, yt_videos_c))
+    _pp = s.shapes.add_shape(5, Inches(0.7), Inches(1.7), Inches(5.2), Inches(3.85))
+    _pp.fill.solid(); _pp.fill.fore_color.rgb = CARD_DARK if dark else CARD_LIGHT
+    _pp.line.fill.background()
+    try: _pp.adjustments[0] = 0.05
+    except: pass
+    apply_shadow(_pp, dark)
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.85),Inches(1.80),Inches(4.90),Inches(3.60),cd).chart
     chart.has_legend = False  # native legend was unreadable — custom dots below
     for i, col in enumerate([GOLD, RGBColor(0x3A,0x3A,0x3A)]):
@@ -3268,7 +3289,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd.add_series("Avg Views", (sv, vv))
     chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(2.67), Inches(1.70),
                                 Inches(8.00), Inches(2.95), cd).chart
-    style_bar_chart(chart, dark, label_fmt='#,##0', inside=True)
+    style_bar_chart(chart, dark, label_fmt='#,##0', max_val=max(sv, vv))
     tb(s, "AVG VIEWS PER UPLOAD", 0.55, 4.78, 12.23, 0.28, size=9.5, align=PP_ALIGN.CENTER,
        color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
     ratio = f"{(vv/sv):.1f}x" if (sv and vv and vv >= sv) else (f"{(sv/vv):.1f}x" if (sv and vv) else "N/A")
@@ -3298,7 +3319,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd1.add_series("Avg Engagement", (se, ve))
     chart1 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.55), Inches(1.70),
                                 Inches(5.70), Inches(2.80), cd1).chart
-    style_bar_chart(chart1, dark, label_fmt='#,##0.0', inside=True)
+    style_bar_chart(chart1, dark, label_fmt='#,##0.0', max_val=max(se, ve))
     tb(s, "AVG ENGAGEMENT PER UPLOAD", 0.55, 4.62, 5.70, 0.26, size=9, align=PP_ALIGN.CENTER,
        color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
     eng_ratio = f"{(ve/se):.1f}x" if (se and ve and ve >= se) else (f"{(se/ve):.1f}x" if (se and ve) else "N/A")
@@ -3310,7 +3331,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd2.add_series("Engagement Rate by View", (se_er, ve_er))
     chart2 = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(6.98), Inches(1.70),
                                 Inches(5.70), Inches(2.80), cd2).chart
-    style_bar_chart(chart2, dark, label_fmt='0.00"%"', inside=True)
+    style_bar_chart(chart2, dark, label_fmt='0.00"%"', max_val=max(se_er, ve_er))
     tb(s, "ENGAGEMENT RATE BY VIEW", 6.98, 4.62, 5.70, 0.26, size=9, align=PP_ALIGN.CENTER,
        color=(TEXT_GRAY_LT if dark else TEXT_GRAY), font=FONT_MONO)
     er_ratio = f"{(se_er/ve_er):.1f}x" if (se_er and ve_er and se_er >= ve_er) else (f"{(ve_er/se_er):.1f}x" if (se_er and ve_er) else "N/A")
@@ -3355,6 +3376,12 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     li_total  = max(sum(li_counts), 1)
     cd = ChartData(); cd.categories = [label for _, label in li_cat_order]
     cd.add_series("Posts", tuple(li_counts))
+    _pp = s.shapes.add_shape(5, Inches(0.4), Inches(1.7), Inches(5.7), Inches(4.15))
+    _pp.fill.solid(); _pp.fill.fore_color.rgb = CARD_DARK if dark else CARD_LIGHT
+    _pp.line.fill.background()
+    try: _pp.adjustments[0] = 0.05
+    except: pass
+    apply_shadow(_pp, dark)
     chart = s.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(0.55),Inches(1.80),Inches(5.40),Inches(3.90),cd).chart
     chart.has_legend = False  # native legend was unreadable — custom dots in the list
     LI_COLORS = [GOLD, RGBColor(0x8B,0x6F,0x47), CARD_DARK, PIE_TAN,
@@ -3443,7 +3470,7 @@ def create_ppt(analysis, handles, ig_raw, fb_raw, yt_raw, li_raw, website_url):
     cd.add_series("Followers",(ig_f,fb_f,yt_f,li_f))
     chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED,
                                 Inches(0.55),Inches(1.75),Inches(12.23),Inches(3.55),cd).chart
-    style_bar_chart(chart, dark, label_fmt='#,##0', inside=True)
+    style_bar_chart(chart, dark, label_fmt='#,##0', max_val=max(ig_f, fb_f, yt_f, li_f))
     for i,(lbl,val) in enumerate([
         ("Instagram", usfmt(ig_raw.get("followers","N/A"))),
         ("Facebook",  usfmt(fb_raw.get("followers","N/A"))),
